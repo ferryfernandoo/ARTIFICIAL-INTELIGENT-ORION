@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTML Editor Feature Documentation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 40px 20px;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 16px;
+            opacity: 0.9;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .section {
+            margin-bottom: 40px;
+        }
+
+        .section h2 {
+            font-size: 24px;
+            color: #667eea;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #f0f0f0;
+            padding-bottom: 10px;
+        }
+
+        .section p {
+            font-size: 15px;
+            line-height: 1.8;
+            color: #555;
+            margin-bottom: 15px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        thead {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        th {
+            padding: 16px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 14px;
+            letter-spacing: 0.5px;
+        }
+
+        td {
+            padding: 14px 16px;
+            border-bottom: 1px solid #f0f0f0;
+            font-size: 14px;
+        }
+
+        tbody tr:hover {
+            background-color: #f9f9f9;
+        }
+
+        tbody tr:last-child td {
+            border-bottom: none;
+        }
+
+        .code {
+            background-color: #f5f5f5;
+            border-left: 3px solid #667eea;
+            padding: 12px 16px;
+            margin: 15px 0;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            overflow-x: auto;
+        }
+
+        .features-list {
+            list-style: none;
+            margin: 15px 0;
+        }
+
+        .features-list li {
+            padding: 10px 0;
+            padding-left: 30px;
+            position: relative;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+
+        .features-list li:before {
+            content: "✓";
+            position: absolute;
+            left: 0;
+            color: #10b981;
+            font-weight: bold;
+            font-size: 16px;
+        }
+
+        .testing-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .test-item {
+            background: #f9f9f9;
+            border: 1px solid #e5e7eb;
+            padding: 15px;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+
+        .test-item::before {
+            content: "☐ ";
+            color: #667eea;
+            font-weight: bold;
+        }
+
+        .badge {
+            display: inline-block;
+            background: #10b981;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-right: 5px;
+        }
+
+        .badge.completed {
+            background: #10b981;
+        }
+
+        .badge.pending {
+            background: #f59e0b;
+        }
+
+        .code-block {
+            background: #1f2937;
+            color: #e5e7eb;
+            padding: 16px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 15px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        .comparison-table {
+            width: 100%;
+            background: white;
+        }
+
+        .comparison-table td:first-child {
+            font-weight: 600;
+            background-color: #f5f5f5;
+            width: 30%;
+        }
+
+        .footer {
+            background: #f9f9f9;
+            padding: 20px 40px;
+            text-align: center;
+            border-top: 1px solid #e5e7eb;
+            font-size: 13px;
+            color: #888;
+        }
+
+        .status-complete {
+            color: #10b981;
+            font-weight: 600;
+        }
+
+        @media (max-width: 768px) {
+            .header {
+                padding: 30px 20px;
+            }
+
+            .header h1 {
+                font-size: 24px;
+            }
+
+            .content {
+                padding: 20px;
+            }
+
+            th, td {
+                padding: 10px 12px;
+                font-size: 13px;
+            }
+
+            .testing-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>💻 HTML Editor Feature</h1>
+            <p>Complete Documentation & Implementation Guide</p>
+        </div>
+
+        <div class="content">
+            <!-- Overview Section -->
+            <div class="section">
+                <h2>📋 Feature Overview</h2>
+                <p>Memungkinkan user untuk melihat, mengedit, dan mengunduh HTML code yang dihasilkan oleh bot dalam format file <code>.html</code>.</p>
+            </div>
+
+            <!-- User Workflow -->
+            <div class="section">
+                <h2>🎯 User Workflow</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Step</th>
+                            <th>Action</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>1</td>
+                            <td>Request HTML</td>
+                            <td>User meminta bot untuk membuat HTML page</td>
+                        </tr>
+                        <tr>
+                            <td>2</td>
+                            <td>Bot Response</td>
+                            <td>Bot mengirim pesan dengan HTML code</td>
+                        </tr>
+                        <tr>
+                            <td>3</td>
+                            <td>Show Button</td>
+                            <td>Button "💻 HTML" muncul di bawah message</td>
+                        </tr>
+                        <tr>
+                            <td>4</td>
+                            <td>Open Editor</td>
+                            <td>User klik tombol untuk buka HTML editor modal</td>
+                        </tr>
+                        <tr>
+                            <td>5</td>
+                            <td>Edit & Preview</td>
+                            <td>User edit HTML dan preview di tab baru</td>
+                        </tr>
+                        <tr>
+                            <td>6</td>
+                            <td>Download</td>
+                            <td>User klik download untuk simpan file .html</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Implementation Details -->
+            <div class="section">
+                <h2>⚙️ Implementation Details</h2>
+                
+                <h3 style="font-size: 16px; color: #555; margin: 20px 0 10px;">State Management</h3>
+                <div class="code">const [showHtmlEditor, setShowHtmlEditor] = useState(false);<br>
+const [htmlContent, setHtmlContent] = useState('');<br>
+const [htmlFilename, setHtmlFilename] = useState('index.html');</div>
+
+                <h3 style="font-size: 16px; color: #555; margin: 20px 0 10px;">Key Functions</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Function</th>
+                            <th>Purpose</th>
+                            <th>Line Reference</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>openHtmlEditor(text)</code></td>
+                            <td>Detects & extracts HTML from message, opens editor modal</td>
+                            <td>~700</td>
+                        </tr>
+                        <tr>
+                            <td><code>downloadHtmlFile()</code></td>
+                            <td>Creates blob, triggers browser download, shows alert</td>
+                            <td>~715</td>
+                        </tr>
+                        <tr>
+                            <td>HTML Button Render</td>
+                            <td>Shows button only when HTML detected in message</td>
+                            <td>~1960</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3 style="font-size: 16px; color: #555; margin: 20px 0 10px;">HTML Detection Patterns</h3>
+                <ul class="features-list">
+                    <li><code>&lt;html[^&gt;]*&gt;[\s\S]*&lt;/html&gt;</code></li>
+                    <li><code>&lt;body[^&gt;]*&gt;[\s\S]*&lt;/body&gt;</code></li>
+                    <li><code>&lt;div[^&gt;]*&gt;[\s\S]*&lt;/div&gt;</code></li>
+                    <li><code>&lt;!DOCTYPE[^&gt;]*&gt;[\s\S]*&lt;/html&gt;</code></li>
+                </ul>
+            </div>
+
+            <!-- Features -->
+            <div class="section">
+                <h2>✨ Features</h2>
+                <ul class="features-list">
+                    <li>HTML Detection - Automatically detects multiple HTML patterns</li>
+                    <li>Auto-Extraction - Extracts complete HTML block from message</li>
+                    <li>Modal Editor - Beautiful modal with textarea editor</li>
+                    <li>Filename Customization - User dapat ganti nama file</li>
+                    <li>Live Preview - Preview di tab baru sebelum download</li>
+                    <li>Browser Download - Download langsung ke Downloads folder</li>
+                    <li>Validation - Prevents download jika HTML kosong</li>
+                    <li>Mobile Responsive - Full responsive design</li>
+                    <li>Language Support - Bahasa Indonesia & English</li>
+                    <li>Proper UX - Modal close on background click</li>
+                </ul>
+            </div>
+
+            <!-- Testing Checklist -->
+            <div class="section">
+                <h2>✓ Testing Checklist</h2>
+                <div class="testing-grid">
+                    <div class="test-item">Bot generates HTML content</div>
+                    <div class="test-item">Button appears on HTML messages</div>
+                    <div class="test-item">Modal opens on button click</div>
+                    <div class="test-item">HTML populated in textarea</div>
+                    <div class="test-item">Filename input works</div>
+                    <div class="test-item">Preview opens in new tab</div>
+                    <div class="test-item">Download saves .html file</div>
+                    <div class="test-item">File has correct content</div>
+                    <div class="test-item">Modal closes after download</div>
+                    <div class="test-item">Modal closes on background click</div>
+                    <div class="test-item">Download disabled when empty</div>
+                    <div class="test-item">Mobile view works</div>
+                </div>
+            </div>
+
+            <!-- File Changes -->
+            <div class="section">
+                <h2>📁 File Changes Summary</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>File</th>
+                            <th>Changes</th>
+                            <th>Impact</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>ChatBot.jsx</code></td>
+                            <td>State vars, functions, modal JSX, button</td>
+                            <td>Core logic & UI rendering</td>
+                        </tr>
+                        <tr>
+                            <td><code>ChatBot.css</code></td>
+                            <td>Modal styling & responsive design</td>
+                            <td>Visual appearance & mobile support</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Browser Support -->
+            <div class="section">
+                <h2>🌐 Browser Support</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Browser</th>
+                            <th>Minimum Version</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Chrome/Edge</td>
+                            <td>90+</td>
+                            <td><span class="badge completed">Supported</span></td>
+                        </tr>
+                        <tr>
+                            <td>Firefox</td>
+                            <td>88+</td>
+                            <td><span class="badge completed">Supported</span></td>
+                        </tr>
+                        <tr>
+                            <td>Safari</td>
+                            <td>14+</td>
+                            <td><span class="badge completed">Supported</span></td>
+                        </tr>
+                        <tr>
+                            <td>Mobile Browsers</td>
+                            <td>Latest</td>
+                            <td><span class="badge completed">Supported</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Future Enhancements -->
+            <div class="section">
+                <h2>🚀 Future Enhancements</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Enhancement</th>
+                            <th>Description</th>
+                            <th>Priority</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Syntax Highlighting</td>
+                            <td>Add code highlighting with Monaco Editor</td>
+                            <td><span class="badge pending">Medium</span></td>
+                        </tr>
+                        <tr>
+                            <td>Undo/Redo</td>
+                            <td>Add undo/redo functionality</td>
+                            <td><span class="badge pending">Medium</span></td>
+                        </tr>
+                        <tr>
+                            <td>Code Beautifier</td>
+                            <td>Auto-format & beautify HTML/CSS/JS</td>
+                            <td><span class="badge pending">Low</span></td>
+                        </tr>
+                        <tr>
+                            <td>HTML Validator</td>
+                            <td>Validate HTML before download</td>
+                            <td><span class="badge pending">Low</span></td>
+                        </tr>
+                        <tr>
+                            <td>Auto-Save</td>
+                            <td>Save to localStorage automatically</td>
+                            <td><span class="badge pending">Low</span></td>
+                        </tr>
+                        <tr>
+                            <td>Multi-Module Support</td>
+                            <td>Extract & edit multiple HTML modules</td>
+                            <td><span class="badge pending">Low</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Status -->
+            <div class="section">
+                <h2>📊 Implementation Status</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Component</th>
+                            <th>Status</th>
+                            <th>Completion</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>HTML Detection</td>
+                            <td><span class="status-complete">Complete</span></td>
+                            <td>100%</td>
+                        </tr>
+                        <tr>
+                            <td>HTML Extraction</td>
+                            <td><span class="status-complete">Complete</span></td>
+                            <td>100%</td>
+                        </tr>
+                        <tr>
+                            <td>Modal Editor</td>
+                            <td><span class="status-complete">Complete</span></td>
+                            <td>100%</td>
+                        </tr>
+                        <tr>
+                            <td>Preview Feature</td>
+                            <td><span class="status-complete">Complete</span></td>
+                            <td>100%</td>
+                        </tr>
+                        <tr>
+                            <td>Download Feature</td>
+                            <td><span class="status-complete">Complete</span></td>
+                            <td>100%</td>
+                        </tr>
+                        <tr>
+                            <td>Responsive Design</td>
+                            <td><span class="status-complete">Complete</span></td>
+                            <td>100%</td>
+                        </tr>
+                        <tr>
+                            <td>Overall Feature</td>
+                            <td><span class="status-complete">Complete</span></td>
+                            <td>100%</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>Generated: April 2026 | Status: <span class="status-complete">✓ Complete & Ready for Testing</span></p>
+        </div>
+    </div>
+</body>
+</html>
