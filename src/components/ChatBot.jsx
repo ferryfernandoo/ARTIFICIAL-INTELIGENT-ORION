@@ -4,10 +4,10 @@ import 'katex/dist/katex.min.css';
 import { sendMessageToGrok, processStreamingResponse } from '../services/grokApi';
 import { memoryService } from '../services/memoryService';
 import { ragService } from '../services/ragService';
-import { researchService } from '../services/researchService';
 import { ConversationPersistenceService } from '../services/conversationPersistenceService';
 import DocumentGenerationService from '../services/documentGenerationService';
 import ImageGenerationService from '../services/imageGenerationService';
+import { VisionAnalysisService } from '../services/visionAnalysisService';
 import { tokenMixTtsService } from '../services/tokenMixTtsService';
 import { detectLanguage, highlightCode, cleanCodeBlock } from '../utils/codeHighlight';
 import VoiceChat from './VoiceChat';
@@ -340,7 +340,7 @@ const getTimeBasedGreeting = (userName = '') => {
 
 
 
-const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
+const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdateUser }) => {
   // Conversations management
   const [conversations, setConversations] = useState([]);
   const [currentConversationId, setCurrentConversationId] = useState(null);
@@ -363,6 +363,9 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
   const [selectedPersonality, setSelectedPersonality] = useState(DEFAULT_PERSONALITY);
   const [showPersonalityModal, setShowPersonalityModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [userName, setUserName] = useState('');
+  const [pendingUserName, setPendingUserName] = useState('');
+  const [showNameSetupModal, setShowNameSetupModal] = useState(false);
   const [showApiDashboard, setShowApiDashboard] = useState(false); // API Marketplace dashboard
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [logoutLoading, setLogoutLoading] = useState(false);
@@ -394,7 +397,6 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
   const [, _setPendingAnswerMessage] = useState(false); // Waiting for user to generate answer
   const [pendingAnswerMessage, _setPendingAnswerMessageContent] = useState(null); // Message pending answer generation
   const [messageFeedback, setMessageFeedback] = useState({}); // Track like/dislike feedback for messages: { messageId: 'like'|'dislike'|null }
-  const [isTtsMuted, setIsTtsMuted] = useState(true); // Mute TTS globally (default OFF to save tokens)
   const [playingMessageId, setPlayingMessageId] = useState(null); // Currently playing TTS message ID
   const [ttsLoading, setTtsLoading] = useState(null); // Message ID currently generating TTS
   const textareaElementRef = useRef(null);
@@ -418,6 +420,67 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
       }
     };
   }, []);
+
+  useEffect(() => {
+    const storedName = localStorage.getItem('orion_user_name');
+    const accountName = user?.name && user.name.trim() && !user.guest && user.name.toLowerCase() !== 'guest' ? user.name.trim() : null;
+
+    if (accountName) {
+      setUserName(accountName);
+      setPendingUserName(accountName);
+      localStorage.setItem('orion_user_name', accountName);
+      setShowNameSetupModal(false);
+      return;
+    }
+
+    if (storedName && storedName.trim()) {
+      setUserName(storedName.trim());
+      setPendingUserName(storedName.trim());
+      setShowNameSetupModal(false);
+      return;
+    }
+
+    setShowNameSetupModal(true);
+  }, [user]);
+
+  const saveUserName = async (name) => {
+    const safeName = (name || '').trim() || 'Teman';
+    setUserName(safeName);
+    setPendingUserName(safeName);
+    localStorage.setItem('orion_user_name', safeName);
+
+    if (isAuthenticated && user?.id) {
+      const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+      try {
+        const response = await fetch(`${apiUrl}/auth/me`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ name: safeName }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.user) {
+            onUpdateUser?.({ name: data.user.name });
+          }
+        } else {
+          const errorData = await response.json().catch(() => null);
+          console.warn('[ChatBot] Failed saving name to server:', errorData);
+        }
+      } catch (error) {
+        console.warn('[ChatBot] Error saving name to server:', error);
+      }
+    } else {
+      onUpdateUser?.({ name: safeName });
+    }
+
+    setShowNameSetupModal(false);
+  };
+
+  const skipNameSetup = () => {
+    saveUserName('Teman');
+  };
 
   const getSourceLogo = (source) => {
     const iconValue = source?.sourceIcon || source?.icon || '';
@@ -460,8 +523,12 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
   const [showDonationModal, setShowDonationModal] = useState(false); // Donation modal visibility
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false); // Delete confirmation modal
   const [deleteConfirmConvId, setDeleteConfirmConvId] = useState(null); // Which conversation to delete
+  const [uploadedImages, setUploadedImages] = useState([]); // Queue of uploaded images for vision analysis
+  const [activeImageFollowUps, setActiveImageFollowUps] = useState([]); // Active image context kept for follow-up prompts, hidden from queue UI
+  const [imageUploadInput, setImageUploadInput] = useState(null); // Ref for hidden image input
+  const [attachmentQueueMinimized, setAttachmentQueueMinimized] = useState(false); // Minimize/maximize attachment queue container
 
-  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3001');
   const retryIntervalRef = useRef(null);
   const messagesEndRef = useRef(null);
   const streamingIntervalRef = useRef(null);
@@ -522,6 +589,15 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
       })
     );
     
+  };
+
+  const isReasoningChunk = (accumulatedText, chunk) => {
+    if (!chunk || typeof chunk !== 'string') return false;
+    const reasoningTag = /<\/?reasoning>/i;
+    const openTags = (accumulatedText.match(/<reasoning>/gi) || []).length;
+    const closeTags = (accumulatedText.match(/<\/reasoning>/gi) || []).length;
+    const currentlyInReasoning = openTags > closeTags;
+    return currentlyInReasoning || reasoningTag.test(chunk);
   };
 
   // Handle paste events - intercept text paste and add to queue instead of input
@@ -765,34 +841,63 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
     });
   };
 
+  const getLatestConversation = (loaded) => {
+    if (!Array.isArray(loaded) || loaded.length === 0) return null;
+    return loaded.reduce((latest, conv) => {
+      if (!conv || !conv.id) return latest;
+      if (!latest) return conv;
+      const latestTime = new Date(latest.updatedAt || latest.createdAt || 0).getTime();
+      const convTime = new Date(conv.updatedAt || conv.createdAt || 0).getTime();
+      return convTime >= latestTime ? conv : latest;
+    }, null);
+  };
+
+  const rememberConversationId = (convId) => {
+    try {
+      localStorage.setItem('chatbot_last_conversation', convId);
+    } catch (e) {
+      console.warn('Unable to save last conversation id:', e);
+    }
+  };
+
   // Load conversations on mount
   useEffect(() => {
     const loadConversations = async () => {
       try {
         console.log(`[ChatBot] Loading conversations. Auth: isAuth=${isAuthenticated}, isGuest=${isGuest}`);
-        // Try to load from appropriate storage (backend for auth, localStorage for guest)
         const loaded = await ConversationPersistenceService.loadConversations(isAuthenticated, isGuest);
         
         if (loaded && Array.isArray(loaded) && loaded.length > 0) {
           console.log(`[ChatBot] ✅ Loaded ${loaded.length} conversations`);
+
+          const lastConvId = localStorage.getItem('chatbot_last_conversation');
+          const lastConv = loaded.find((conv) => conv.id === lastConvId);
+          const targetConv = lastConv || getLatestConversation(loaded) || loaded[0];
+
+          // Log messages with generated images
+          const messagesWithGenImages = targetConv.messages?.filter(m => m.imageUrl) || [];
+          console.log(`[ChatBot] Found ${messagesWithGenImages.length} messages with generated images`);
           
-          const firstConv = loaded[0];
-          console.log(`[ChatBot] Setting first conversation: ID=${firstConv.id}, Messages: ${firstConv.messages?.length || 0}`);
-          
-          // Check for messages with images
-          const messagesWithImages = firstConv.messages?.filter(m => m.imageUrl) || [];
-          console.log(`[ChatBot] ✅ Found ${messagesWithImages.length} messages with images`);
-          messagesWithImages.forEach((msg, idx) => {
-            console.log(`  [${idx}] Message ${msg.id}: imageUrl=${msg.imageUrl?.substring(0, 80)}...`);
+          // Log messages with uploaded images (user attachments)
+          const messagesWithUploadedImages = targetConv.messages?.filter(m => m.images?.length > 0) || [];
+          const totalUploadedImages = messagesWithUploadedImages.reduce((sum, m) => sum + m.images.length, 0);
+          console.log(`[ChatBot] Found ${messagesWithUploadedImages.length} messages with ${totalUploadedImages} uploaded images`);
+          messagesWithUploadedImages.forEach((msg, idx) => {
+            console.log(`  [${idx}] Message ${msg.id}: ${msg.images.length} images (${msg.sender})`);
+            msg.images.forEach((img, imgIdx) => {
+              console.log(`    - Image ${imgIdx}: ${img.fileName}`);
+            });
           });
+
+          console.log(`[ChatBot] Setting conversation: ID=${targetConv.id}, Messages: ${targetConv.messages?.length || 0}`);
           
           setConversations(loaded);
-          setCurrentConversationId(firstConv.id);
-          setMessages(firstConv.messages);
+          setCurrentConversationId(targetConv.id);
+          setMessages(targetConv.messages);
+          rememberConversationId(targetConv.id);
           return;
         }
         
-        // If no conversations found, create new one
         createNewConversation();
       } catch (err) {
         console.error('Error loading conversations:', err);
@@ -829,6 +934,11 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
   // Keep the active conversation object in sync with the current messages state
   useEffect(() => {
     if (!currentConversationId) return;
+    
+    // Count images in current messages
+    const imageCount = messages.reduce((sum, msg) => sum + (msg.images?.length || 0), 0);
+    console.log(`[ChatBot] Syncing messages to conversation (${messages.length} messages, ${imageCount} images)`);
+    
     setConversations((prev) =>
       prev.map((conv) =>
         conv.id === currentConversationId
@@ -841,14 +951,13 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
   // Auto-scroll to bottom when conversation loads or messages change
   useEffect(() => {
     if (!currentConversationId || messages.length === 0) return;
-    
-    // Delay to ensure DOM is rendered
+
     const scrollTimer = setTimeout(() => {
       scrollToBottom(true);
     }, 100);
 
     return () => clearTimeout(scrollTimer);
-  }, [currentConversationId]);
+  }, [currentConversationId, messages.length]);
 
   // Preload external RAG index from public/rag_index.json when the app mounts
   useEffect(() => {
@@ -1059,10 +1168,15 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
   const switchConversation = (convId) => {
     const conv = conversations.find((c) => c.id === convId);
     if (conv) {
+      // Count images being loaded
+      const imageCount = conv.messages.reduce((sum, msg) => sum + (msg.images?.length || 0), 0);
+      console.log(`[ChatBot] Switching to conversation "${conv.title}" (${conv.messages.length} messages, ${imageCount} images)`);
+      
       setCurrentConversationId(convId);
       setMessages(conv.messages || []);
       setError(null);
       setCompactView(true);
+      rememberConversationId(convId);
       
       // Auto-scroll to bottom when opening/switching to a room
       setTimeout(() => {
@@ -1280,12 +1394,292 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
     setUploadedFiles(prev => prev.filter(f => f.id !== fileId));
   };
 
-  // Clear all uploaded files
-  const clearAllUploadedFiles = () => {
+  // Clear all uploaded files and images
+  const clearAllAttachments = () => {
     setUploadedFiles([]);
+    setUploadedImages([]);
   };
 
-  // Detect and open code editor for any language
+  const uploadImageToServer = async (file) => {
+    const formData = new FormData();
+    formData.append('image', file);
+    const uploadUrl = `${apiBaseUrl}/api/vision/upload`;
+    console.log('[ChatBot] Upload image to server:', uploadUrl, file.name, file.type, file.size);
+
+    const response = await fetch(uploadUrl, {
+      method: 'POST',
+      credentials: 'include',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => null);
+      console.error('[ChatBot] Image upload response error:', response.status, errorData);
+      throw new Error(errorData?.error || `Upload failed: ${response.status}`);
+    }
+
+    return response.json();
+  };
+
+  // Handle image upload from file input
+  const handleImageUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      // Validate image type
+      const validImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'];
+      if (!validImageTypes.includes(file.type)) {
+        alert(userLanguage === 'id' 
+          ? '❌ Format gambar tidak didukung. Gunakan: JPG, PNG, WebP, GIF'
+          : '❌ Image format not supported. Use: JPG, PNG, WebP, GIF');
+        return;
+      }
+
+      // Validate file size (max 10MB)
+      if (file.size > 10 * 1024 * 1024) {
+        alert(userLanguage === 'id' 
+          ? '❌ Gambar terlalu besar (max 10MB)'
+          : '❌ Image too large (max 10MB)');
+        return;
+      }
+
+      const imageId = `img_${Date.now()}`;
+      const reader = new FileReader();
+      reader.onload = async (evt) => {
+        const base64Data = evt.target.result;
+
+        const newImage = {
+          id: imageId,
+          fileName: file.name,
+          dataUrl: base64Data,
+          publicUrl: null,
+          status: 'uploading', // uploading, queued, analyzing, analyzed
+          analysis: null,
+          error: null,
+          followUpRemaining: 20,
+        };
+
+        setUploadedImages(prev => [...prev, newImage]);
+        setAttachmentQueueMinimized(false);
+
+        try {
+          const uploadResult = await uploadImageToServer(file);
+          setUploadedImages(prev => prev.map(img => 
+            img.id === imageId
+              ? { ...img, publicUrl: uploadResult.url, status: 'queued' }
+              : img
+          ));
+        } catch (uploadError) {
+          console.error('[ChatBot] Image server upload failed:', uploadError);
+          setUploadedImages(prev => prev.map(img => 
+            img.id === imageId
+              ? { ...img, status: 'error', error: uploadError.message }
+              : img
+          ));
+          setCustomAlert({
+            type: 'error',
+            message: userLanguage === 'id' 
+              ? `❌ Gagal upload gambar "${file.name}": ${uploadError.message}`
+              : `❌ Failed to upload "${file.name}": ${uploadError.message}`,
+            duration: 5000
+          });
+          return;
+        }
+
+        setCustomAlert({
+          type: 'success',
+          message: userLanguage === 'id' 
+            ? `📸 Gambar "${file.name}" siap dianalisis`
+            : `📸 Image "${file.name}" ready for analysis`,
+          duration: 2000
+        });
+      };
+
+      reader.readAsDataURL(file);
+    } catch (error) {
+      console.error('[ChatBot] Image upload error:', error);
+      setCustomAlert({
+        type: 'error',
+        message: userLanguage === 'id' ? '❌ Error upload gambar' : '❌ Image upload error',
+        duration: 3000
+      });
+    } finally {
+      if (imageUploadInput) {
+        imageUploadInput.value = '';
+      }
+    }
+  };
+
+  // Remove uploaded image
+  const removeUploadedImage = (imageId) => {
+    setUploadedImages(prev => prev.filter(img => img.id !== imageId));
+  };
+
+  // Analyze uploaded images before sending message - returns map of imageId -> analysis
+  const analyzeUploadedImages = async () => {
+    const pendingImages = uploadedImages.filter(img => img.status === 'queued');
+    const analysisMap = {}; // Store results to return immediately, not wait for state
+    
+    for (const image of pendingImages) {
+      try {
+        // Update status to analyzing
+        setUploadedImages(prev => prev.map(img => 
+          img.id === image.id ? { ...img, status: 'analyzing' } : img
+        ));
+
+        console.log('[ChatBot] Analyzing image with Qwen3-VL:', image.fileName);
+        
+        // Use base64 data directly - no public URL needed
+        const imageDataForAnalysis = image.dataUrl;
+
+        // Build context from recent conversation history
+        const recentMessages = Object.values(messages).slice(-5);
+        const contextLines = recentMessages.map(m => {
+          const sender = m.user === 'user' ? 'User' : 'AI';
+          const text = typeof m.text === 'string' ? m.text.substring(0, 100) : '';
+          return `${sender}: ${text}`;
+        });
+        const contextStr = contextLines.length > 0 ? contextLines.join('\n') : 'No context';
+        
+        // Build question with context
+        const contextQuestion = `Konteks percakapan:\n${contextStr}\n\nLihat gambar ini dan jelaskan apa yang ada dengan mempertimbangkan konteks di atas.`;
+
+        // Call vision analysis service
+        const result = await VisionAnalysisService.analyzeImage(
+          imageDataForAnalysis,
+          contextQuestion
+        );
+
+        // Store result in map and update UI state
+        analysisMap[image.id] = result.analysis;
+
+        // Update with analysis result
+        setUploadedImages(prev => prev.map(img => 
+          img.id === image.id 
+            ? { 
+                ...img, 
+                status: 'analyzed',
+                analysis: result.analysis
+              } 
+            : img
+        ));
+
+        console.log('[ChatBot] Image analysis complete:', image.id, 'Analysis:', result.analysis.substring(0, 100));
+      } catch (error) {
+        console.error('[ChatBot] Image analysis error:', error);
+        
+        // Mark as errored
+        setUploadedImages(prev => prev.map(img => 
+          img.id === image.id 
+            ? { 
+                ...img, 
+                status: 'error',
+                error: error.message
+              } 
+            : img
+        ));
+
+        setCustomAlert({
+          type: 'error',
+          message: userLanguage === 'id' 
+            ? `❌ Gagal analisis "${image.fileName}"`
+            : `❌ Failed to analyze "${image.fileName}"`,
+          duration: 3000
+        });
+      }
+    }
+    return analysisMap; // Return map of imageId -> analysis results
+  };
+
+  // Save/load uploaded images from localStorage
+  useEffect(() => {
+    if (!currentConversationId) return;
+    
+    // Save to localStorage
+    const storageKey = `deepernova_images_${currentConversationId}`;
+    if (uploadedImages.length > 0) {
+      localStorage.setItem(storageKey, JSON.stringify(uploadedImages));
+    } else {
+      localStorage.removeItem(storageKey);
+    }
+  }, [uploadedImages, currentConversationId]);
+
+  useEffect(() => {
+    if (!currentConversationId) return;
+
+    const activeKey = `deepernova_active_images_${currentConversationId}`;
+    if (activeImageFollowUps.length > 0) {
+      localStorage.setItem(activeKey, JSON.stringify(activeImageFollowUps));
+    } else {
+      localStorage.removeItem(activeKey);
+    }
+  }, [activeImageFollowUps, currentConversationId]);
+
+  // Load uploaded images from localStorage when conversation changes
+  useEffect(() => {
+    if (!currentConversationId) return;
+    
+    const storageKey = `deepernova_images_${currentConversationId}`;
+    const savedImages = localStorage.getItem(storageKey);
+    if (savedImages) {
+      try {
+        const parsedImages = JSON.parse(savedImages);
+        setUploadedImages(parsedImages);
+      } catch (error) {
+        console.error('[ChatBot] Error loading saved images:', error);
+      }
+    } else {
+      setUploadedImages([]);
+    }
+
+    const activeKey = `deepernova_active_images_${currentConversationId}`;
+    const savedActive = localStorage.getItem(activeKey);
+    if (savedActive) {
+      try {
+        const parsedActive = JSON.parse(savedActive);
+        setActiveImageFollowUps(Array.isArray(parsedActive) ? parsedActive : []);
+      } catch (error) {
+        console.error('[ChatBot] Error loading active image follow-ups:', error);
+        setActiveImageFollowUps([]);
+      }
+    } else {
+      setActiveImageFollowUps([]);
+    }
+  }, [currentConversationId]);
+
+  useEffect(() => {
+    if (uploadedFiles.length + uploadedImages.length > 0) {
+      setAttachmentQueueMinimized(false);
+    }
+  }, [uploadedFiles.length, uploadedImages.length, currentConversationId]);
+
+  // Handle customAlert auto-dismiss with fade-out animation
+  const [dismissingAlert, setDismissingAlert] = useState(false);
+  const alertTimeoutRef = useRef(null);
+
+  useEffect(() => {
+    if (!customAlert || customAlert.duration === 0) return;
+
+    // Clear any existing timeout
+    if (alertTimeoutRef.current) clearTimeout(alertTimeoutRef.current);
+
+    // Trigger fade-out after duration - allow 400ms for animation
+    const dismissDelay = Math.max(customAlert.duration - 400, 0);
+    alertTimeoutRef.current = setTimeout(() => {
+      setDismissingAlert(true);
+      // Clear after animation completes
+      setTimeout(() => {
+        setCustomAlert(null);
+        setDismissingAlert(false);
+      }, 400);
+    }, dismissDelay);
+
+    return () => {
+      if (alertTimeoutRef.current) clearTimeout(alertTimeoutRef.current);
+    };
+  }, [customAlert]);
+
   const openHtmlEditor = (text) => {
     // Try to extract code blocks first (fenced code)
     const codeMatch = text.match(/```[\s\S]*?```/);
@@ -1645,14 +2039,21 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
         new AbortController(),
         selectedModel,
         isAuthenticated,
-        isGuest
+        isGuest,
+        userName || user?.name
       );
 
       let fullText = '';
-      
-      await processStreamingResponse(
-        response,
-        (chunk) => {
+      let editChunkQueue = [];
+      let isProcessingEditChunks = false;
+      const CHUNK_DELAY_MS = 120;
+
+      const processEditQueuedChunks = async () => {
+        if (isProcessingEditChunks || editChunkQueue.length === 0) return;
+        isProcessingEditChunks = true;
+
+        while (editChunkQueue.length > 0) {
+          const chunk = editChunkQueue.shift();
           fullText += chunk;
           setMessages((prev) =>
             prev.map((msg) =>
@@ -1661,8 +2062,25 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
                 : msg
             )
           );
+          const isInReasoning = isReasoningChunk(fullText, chunk);
+          if (!isInReasoning && editChunkQueue.length > 0) {
+            await new Promise(resolve => setTimeout(resolve, CHUNK_DELAY_MS));
+          }
+        }
+        isProcessingEditChunks = false;
+      };
+      
+      await processStreamingResponse(
+        response,
+        (chunk) => {
+          editChunkQueue.push(chunk);
+          processEditQueuedChunks();
         }
       );
+
+      while (editChunkQueue.length > 0 || isProcessingEditChunks) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
 
       finishStreaming(placeholderId);
       
@@ -1727,6 +2145,7 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
 
   /**
    * Handle TTS play/stop for a message
+   * Always available - no mute check needed
    */
   const handleTtsToggle = async (message) => {
     try {
@@ -1737,12 +2156,6 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
         return;
       }
 
-      // If TTS muted, show alert
-      if (isTtsMuted) {
-        showAlert(userLanguage === 'id' ? 'TTS dimatikan' : 'TTS is muted', 'info', 2000);
-        return;
-      }
-
       // Stop any currently playing audio
       if (playingMessageId) {
         tokenMixTtsService.stop();
@@ -1750,8 +2163,25 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
 
       setTtsLoading(message.id);
 
-      // Generate and play TTS
-      const audioBlob = await tokenMixTtsService.textToSpeech(message.text, 'alloy');
+      const { mainContent } = extractReasoningContent(message.text);
+      const textForSpeech = (mainContent && mainContent.length > 0)
+        ? mainContent
+        : message.text.replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '').replace(/<reasoning>/gi, '').replace(/<\/reasoning>/gi, '').trim();
+
+      if (!textForSpeech) {
+        setTtsLoading(null);
+        showAlert(
+          userLanguage === 'id'
+            ? 'Tidak ada teks utama untuk dibaca.'
+            : 'No main text available to speak.',
+          'warning',
+          3000
+        );
+        return;
+      }
+
+      // Generate and play TTS on frontend for low latency
+      const audioBlob = await tokenMixTtsService.textToSpeech(textForSpeech, 'alloy');
       
       setPlayingMessageId(message.id);
       setTtsLoading(null);
@@ -1772,41 +2202,25 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
     }
   };
 
-  /**
-   * Handle toggle mute TTS
-   */
-  const handleToggleTtsMute = () => {
-    const newMutedState = !isTtsMuted;
-    setIsTtsMuted(newMutedState);
-    
-    // Stop current audio if muting
-    if (newMutedState) {
-      tokenMixTtsService.stop();
-      setPlayingMessageId(null);
-    }
-    
-    showAlert(
-      newMutedState 
-        ? (userLanguage === 'id' ? 'Suara dimatikan' : 'TTS muted')
-        : (userLanguage === 'id' ? 'Suara diaktifkan' : 'TTS unmuted'),
-      'success',
-      1500
-    );
-  };
-
   // Handle stop streaming
   const handleStopStreaming = () => {
-    // Abort the current conversation's stream
-    if (currentConversationId) {
-      const controller = abortControllersMapRef.current.get(currentConversationId);
-      if (controller) {
+    // Abort every active stream controller so X always stops generation no matter what
+    abortControllersMapRef.current.forEach((controller) => {
+      try {
         controller.abort();
-        abortControllersMapRef.current.delete(currentConversationId);
+      } catch (err) {
+        console.debug('Abort controller error:', err);
       }
-    }
+    });
+    abortControllersMapRef.current.clear();
+
     // Fallback for global ref (for backward compatibility)
     if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
+      try {
+        abortControllerRef.current.abort();
+      } catch (err) {
+        console.debug('Abort fallback error:', err);
+      }
       abortControllerRef.current = null;
     }
 
@@ -1818,7 +2232,7 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
       clearInterval(statusUpdateIntervalRef.current);
       statusUpdateIntervalRef.current = null;
     }
-    
+
     // If AI just started responding (still streaming, no content), restore prompt
     if (currentMessageIdRef.current && lastSentPromptRef.current) {
       const aiMessage = messages.find(m => m.id === currentMessageIdRef.current);
@@ -1837,7 +2251,7 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
         }));
       }
     }
-    
+
     setLoadingStatusMsg('Generasi dihentikan');
     streamingStartTimeRef.current = null;
     isPausedRef.current = false;
@@ -2783,14 +3197,21 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
         new AbortController(),
         selectedModel,
         isAuthenticated,
-        isGuest
+        isGuest,
+        userName || user?.name
       );
 
       let fullText = '';
-      
-      await processStreamingResponse(
-        response,
-        (chunk) => {
+      let imgChunkQueue = [];
+      let isProcessingImgChunks = false;
+      const CHUNK_DELAY_MS = 120;
+
+      const processImgQueuedChunks = async () => {
+        if (isProcessingImgChunks || imgChunkQueue.length === 0) return;
+        isProcessingImgChunks = true;
+
+        while (imgChunkQueue.length > 0) {
+          const chunk = imgChunkQueue.shift();
           fullText += chunk;
           setMessages((prev) =>
             prev.map((msg) =>
@@ -2799,8 +3220,25 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
                 : msg
             )
           );
+          const isInReasoning = isReasoningChunk(fullText, chunk);
+          if (!isInReasoning && imgChunkQueue.length > 0) {
+            await new Promise(resolve => setTimeout(resolve, CHUNK_DELAY_MS));
+          }
+        }
+        isProcessingImgChunks = false;
+      };
+      
+      await processStreamingResponse(
+        response,
+        (chunk) => {
+          imgChunkQueue.push(chunk);
+          processImgQueuedChunks();
         }
       );
+
+      while (imgChunkQueue.length > 0 || isProcessingImgChunks) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
 
       // Mark streaming as finished
       finishStreaming(placeholderId);
@@ -3012,75 +3450,66 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
     return ImageGenerationService.detectImageRequest(message);
   };
 
+  const shouldUseRagForInput = (input) => {
+    if (!input || typeof input !== 'string') return false;
+    const normalized = input.toLowerCase();
+    const triggers = [
+      'orion', 'deepernova', 'deeper nova', 'misi', 'visi', 'fitur', 'produk',
+      'tim', 'donasi', 'panduan', 'dokumen', 'manual', 'spesifikasi', 'roadmap',
+      'knowledge base', 'pengetahuan', 'layanan', 'kebijakan', 'harga', 'company',
+      'team', 'founder', 'cara kerja', 'apa itu'
+    ];
+    return triggers.some(term => normalized.includes(term));
+  };
+
   /**
    * Call the web search endpoint
    * Returns: { success, answer, searchResults, error }
    */
-  const callWebSearch = async (query) => {
-    try {
-      console.log('[ChatBot] 🔍 Calling web search endpoint with query:', query);
-      
-      // Detect query language - force Indonesian if query has Indonesian keywords
-      let searchLanguage = userLanguage || 'id';
-      const indonesianKeywords = /\b(apa|siapa|kapan|dimana|bagaimana|mengapa|kenapa|yang|ini|itu)\b/i;
-      if (indonesianKeywords.test(query)) {
-        searchLanguage = 'id';  // Force Indonesian for web search if query looks Indonesian
-        console.log('[ChatBot] 🌍 Query detected as Indonesian, using Indonesian search');
-      }
-      
-      const response = await fetch(`${apiBaseUrl}/api/chat/web-search`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          query: query,
-          conversationHistory: messages.slice(-5),  // Last 5 messages for context
-          language: searchLanguage,
-          model: selectedModel || 'deepseek-chat'
-        })
-      });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        console.error('[ChatBot] Web search failed:', data.error);
-        return {
-          success: false,
-          error: data.error || 'Web search failed',
-          answer: data.error  // Will show the error message to user
-        };
-      }
-
-      console.log('[ChatBot] ✅ Web search succeeded!', {
-        resultCount: data.searchResults?.length,
-        answerLength: data.answer?.length
-      });
-
-      return {
-        success: true,
-        answer: data.answer,
-        searchResults: data.searchResults,
-        error: null
-      };
-    } catch (error) {
-      console.error('[ChatBot] Web search endpoint error:', error.message);
-      return {
-        success: false,
-        error: 'Maaf, search web gagal tidak tersedia untuk saat ini.',
-        answer: 'Maaf, search web gagal tidak tersedia untuk saat ini.'
-      };
-    }
-  };
 
   const handleSendMessage = async (e) => {
     e.preventDefault();
 
-    // Check if there's any message content to send (regular text OR text queue)
+    // Check if there's any message content to send (regular text OR text queue OR uploaded images OR uploaded files)
     const hasRegularText = inputValue.trim().length > 0;
     const hasQueuedText = textQueue.length > 0;
-    
-    if (!hasRegularText && !hasQueuedText) return;
+    const hasUploadedImages = uploadedImages.length > 0;
+    const hasUploadedFiles = uploadedFiles.length > 0;
+
+    if (!hasRegularText && !hasQueuedText && !hasUploadedImages && !hasUploadedFiles) return;
+
+    // Analyze uploaded images first (non-blocking, runs in background)
+    let analysisResults = {};
+    if (uploadedImages.length > 0) {
+      analysisResults = await analyzeUploadedImages();
+    }
+
+    const imagesToActivate = uploadedImages.map(img => ({
+      ...img,
+      followUpRemaining: img.followUpRemaining != null ? img.followUpRemaining : 20,
+      activatedAt: Date.now(),
+    }));
+    const mergedFollowUpsMap = new Map();
+    [...activeImageFollowUps, ...imagesToActivate].forEach(img => {
+      if (!mergedFollowUpsMap.has(img.id)) {
+        mergedFollowUpsMap.set(img.id, img);
+      }
+    });
+    const combinedFollowUps = Array.from(mergedFollowUpsMap.values());
+
+    const buildImageFollowUpContext = (images) => {
+      if (!images || images.length === 0) return '';
+      return images.map(img => {
+        const remaining = img.followUpRemaining != null ? img.followUpRemaining : 20;
+        const summary = img.analysis
+          ? img.analysis
+          : userLanguage === 'id'
+            ? 'Analisis gambar masih diproses, tetapi ini akan digunakan sebagai referensi visual untuk respons berikutnya.'
+            : 'Image analysis is still processing, but this will be used as a visual reference for the next responses.';
+        return `📸 [${img.fileName}] (${remaining} ${userLanguage === 'id' ? 'pertanyaan tersisa' : 'questions left'})\n${summary}`;
+      }).join('\n\n');
+    };
 
     // Combine message with uploaded file contents
     let fullMessage = inputValue;
@@ -3093,6 +3522,20 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate }) => {
       fullMessage = inputValue 
         ? `${inputValue}\n\n${textContents}`
         : textContents;
+    }
+    
+    // Auto-include analyzed images if any exist
+    if (uploadedImages.length > 0) {
+      // Use results from analyzeUploadedImages(), plus any existing image.analysis state
+      const imageContexts = uploadedImages
+        .map(img => {
+          const analysisText = analysisResults[img.id] || img.analysis || (userLanguage === 'id'
+            ? 'Analisis gambar masih diproses, tetapi ini akan digunakan sebagai referensi visual untuk respons berikutnya.'
+            : 'Image analysis is still processing, but this will be used as a visual reference for the next responses.');
+          return `📸 [${img.fileName}]\n${analysisText}`;
+        })
+        .join('\n\n');
+      fullMessage = `${fullMessage}\n\n[ANALISIS GAMBAR DARI QWEN3-VL]\n${imageContexts}`;
     }
     
     // Auto-include uploaded files if any exist
@@ -3130,12 +3573,8 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
         timestamp: new Date(),
         files: uploadedFiles.length > 0 ? uploadedFiles : null,
         textQueue: textQueue.length > 0 ? textQueue : null,
-      };
-      setError(null);
-      setIsScrolledUp(false);
-      setInputValue('');
-      setUploadedFiles([]);
-      setTextQueue([]);
+          images: uploadedImages.length > 0 ? uploadedImages : null,
+      }
       if (globalThis.textareaRef) {
         globalThis.textareaRef.style.height = 'auto';
       }
@@ -3143,45 +3582,28 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
       return;
     }
 
-    // Try to get research context first (for current events, latest info)
-    let researchContext = '';
-    let webSearchPerformed = false;
-    let webSearchAnswer = null;
-
-    try {
-      // Only use knowledge base + RAG
-      console.log('[ChatBot] 🔐 Using knowledge base only');
-      const researchResults = await researchService.smartSearch(inputValue, { forceSearch: false });
-      const sources = researchResults?.data?.sources || [];
-      
-      setFoundSources(sources);
-
-      // Simply use research results if available
-      if (sources.length > 0) {
-        const confidence = researchResults?.data?.confidence || 0;
-        const sourcesList = sources
-          .map((s, i) => `${i+1}. [${s.type}] ${s.title} (${s.source})\n   ${s.snippet || s.title}`)
-          .join('\n\n');
-        researchContext = `RESEARCH RESULTS (${confidence}% confidence):\n${sourcesList}`;
-        console.log(`[ChatBot] 📚 Found ${sources.length} sources from knowledge base`);
-      } else {
-        console.log('[ChatBot] ℹ️ No sources found in knowledge base - AI will answer from training data');
-      }
-    } catch (err) {
-      console.error('[ChatBot] Error during search phase:', err.message);
-      setFoundSources([]);
+    // Auto-include follow-up image context for active images
+    const activeImageContext = buildImageFollowUpContext(combinedFollowUps);
+    if (activeImageContext) {
+      fullMessage = `${fullMessage}\n\n[ANALISIS GAMBAR TERUSAN]\n${activeImageContext}`;
     }
 
-    // Retrieve relevant context from RAG knowledge base (fallback/supplement)
-    const ragResults = ragService.search(inputValue, 3, 'knowledge_base');
+    // Retrieve relevant context from RAG knowledge base only for queries that appear domain-specific
     let ragContext = '';
-    if (ragResults && ragResults.length > 0) {
-      ragContext = ragService.formatContextForPrompt(ragResults, 1000);
+    if (shouldUseRagForInput(inputValue)) {
+      const ragResults = ragService.searchWithScores(inputValue, 3, 'knowledge_base');
+      const relevantResults = ragResults.filter(item => item.score > 0.75);
+      if (relevantResults.length > 0) {
+        ragContext = ragService.formatContextForPrompt(relevantResults, 1000);
+      } else {
+        console.log('[ChatBot] RAG search skipped because no high-confidence knowledge base docs found.');
+      }
+    } else {
+      console.log('[ChatBot] Skipping RAG injection for non-domain query.');
     }
 
-    // Combine research + RAG context
-    const combinedContext = [researchContext, ragContext].filter(c => c?.trim()).join('\n\n---\n\n');
-    if (combinedContext.trim()) {
+    const combinedContext = ragContext.trim() ? ragContext : '';
+    if (combinedContext) {
       fullMessage = `${fullMessage}\n\n${combinedContext}`;
     }
 
@@ -3210,7 +3632,39 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
       if (globalThis.textareaRef) {
         globalThis.textareaRef.style.height = 'auto';
       }
+
+      // Activate uploaded images for follow-up analysis and hide the queue UI
+      if (imagesToActivate.length > 0) {
+        setActiveImageFollowUps(prev => {
+          const combined = [...prev, ...imagesToActivate];
+          const unique = [];
+          const seen = new Set();
+          combined.forEach(img => {
+            if (!seen.has(img.id)) {
+              seen.add(img.id);
+              unique.push(img);
+            }
+          });
+          return unique;
+        });
+        setUploadedImages([]);
+        setAttachmentQueueMinimized(true);
+        if (currentConversationId) {
+          localStorage.removeItem(`deepernova_images_${currentConversationId}`);
+        }
+      }
       
+      // Decrement follow-up counter for active images after this prompt
+      if (combinedFollowUps.length > 0) {
+        const updatedFollowUps = combinedFollowUps
+          .map(img => ({
+            ...img,
+            followUpRemaining: Math.max(0, (img.followUpRemaining != null ? img.followUpRemaining : 20) - 1),
+          }))
+          .filter(img => img.followUpRemaining > 0);
+        setActiveImageFollowUps(updatedFollowUps);
+      }
+
       // Add user message to chat display
       const userMessageForChat = {
         id: Date.now(),
@@ -3219,24 +3673,8 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
         timestamp: new Date(),
         files: uploadedFiles.length > 0 ? uploadedFiles : null,
         textQueue: textQueue.length > 0 ? textQueue : null,
+        images: uploadedImages.length > 0 ? uploadedImages : null,
       };
-
-      // Direct image request detection: route explicit image prompts straight to image generation
-      const imageRequest = checkForImageRequest(fullMessage);
-      if (imageRequest) {
-        console.log('[ChatBot] Direct IMAGE_REQUEST detected, bypassing chat model.');
-        setInputValue('');
-        setUploadedFiles([]);
-        setTextQueue([]);
-        if (globalThis.textareaRef) {
-          globalThis.textareaRef.style.height = 'auto';
-        }
-        setError(null);
-        setIsScrolledUp(false);
-
-        await handleInlineImageGeneration(imageRequest, userMessageForChat);
-        return;
-      }
 
       setMessages((prev) => [...prev, userMessageForChat]);
       setCompactView(true);
@@ -3332,7 +3770,7 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
       // Capture conversationId NOW so it's used in streaming callback, not currentConversationId (which can change)
       const streamingConversationId = currentConversationId;
       
-      const response = await sendMessageToGrok(fullMessage, messages, userLanguage, streamingConversationId, selectedPersonality, abortController, selectedModel, isAuthenticated, isGuest);
+      const response = await sendMessageToGrok(fullMessage, messages, userLanguage, streamingConversationId, selectedPersonality, abortController, selectedModel, isAuthenticated, isGuest, userName || user?.name, isReasonMode);
 
       // Process streaming response - do NOT start local simulated streaming
       // Keep the placeholder and show the empty area below the user's message.
@@ -3349,18 +3787,44 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
 
       // Declare accumulatedText here so it can be used after streaming completes
       let accumulatedText = '';
+      let chunkQueue = [];
+      let isProcessingChunks = false;
+      const CHUNK_DELAY_MS = 120; // Delay antara chunks untuk non-reasoning (ms)
+
+      const processQueuedChunks = async () => {
+        if (isProcessingChunks || chunkQueue.length === 0) return;
+        isProcessingChunks = true;
+
+        while (chunkQueue.length > 0) {
+          const chunk = chunkQueue.shift();
+          
+          // Update the message in real-time as chunks arrive without forcing auto-scroll
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === placeholderId
+                ? { ...msg, text: msg.text + chunk }
+                : msg
+            )
+          );
+
+          // Deteksi apakah sedang di dalam reasoning tag
+          const isInReasoning = isReasoningChunk(accumulatedText, chunk);
+          
+          // Delay hanya untuk non-reasoning chunks
+          if (!isInReasoning && chunkQueue.length > 0) {
+            await new Promise(resolve => setTimeout(resolve, CHUNK_DELAY_MS));
+          }
+        }
+
+        isProcessingChunks = false;
+      };
 
       // Process streaming response - chunks come in real-time
       await processStreamingResponse(response, (chunk) => {
         accumulatedText += chunk;
-        // Update the message in real-time as chunks arrive without forcing auto-scroll
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === placeholderId
-              ? { ...msg, text: msg.text + chunk }
-              : msg
-          )
-        );
+        chunkQueue.push(chunk);
+        processQueuedChunks();
+
         // Extract reasoning from accumulated text for live popup
         if (isReasonMode) {
           const reasoningMatch = accumulatedText.match(/<reasoning>([\s\S]*?)<\/?reasoning>/i);
@@ -3384,6 +3848,11 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
         }
         // Do not auto-scroll here; keep the blank area stable while generating
       }, abortController.signal);
+
+      // Tunggu sampai semua chunks selesai diproses
+      while (chunkQueue.length > 0 || isProcessingChunks) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
       
       // Hide reasoning popup after streaming completes
       setShowReasoningPopup(false);
@@ -3428,6 +3897,17 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
         await ConversationPersistenceService.saveConversations(conversations, isAuthenticated, isGuest);
       };
       setTimeout(() => saveAfterResponse(), 100);
+
+      // Clear uploaded files and images, then minimize image queue
+      setTimeout(() => {
+        setUploadedFiles([]);
+        setUploadedImages([]);
+        setAttachmentQueueMinimized(true);
+        // Also clear from localStorage
+        if (currentConversationId) {
+          localStorage.removeItem(`deepernova_images_${currentConversationId}`);
+        }
+      }, 200);
 
       // After successful finish, keep compact view focused (at bottom)
       setCompactView(true);
@@ -3575,18 +4055,44 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
       // If continuing from partial response, send continuation prompt
       if (partialMessageIdRef.current) {
         const continuePrompt = `[Lanjutkan dari mana tadi, jangan ulangi pesan sebelumnya, hanya lanjutkan teks berikutnya]`;
-        const response = await sendMessageToGrok(continuePrompt, messages, userLanguage, streamingConversationId, selectedPersonality, abortController, selectedModel, isAuthenticated, isGuest);
+        const response = await sendMessageToGrok(continuePrompt, messages, userLanguage, streamingConversationId, selectedPersonality, abortController, selectedModel, isAuthenticated, isGuest, userName || user?.name, isReasonMode);
         const msgId = partialMessageIdRef.current;
 
+        let accumulatedRetryText = '';
+        let retryChunkQueue = [];
+        let isProcessingRetryChunks = false;
+        const CHUNK_DELAY_MS = 120;
+
+        const processRetryQueuedChunks = async () => {
+          if (isProcessingRetryChunks || retryChunkQueue.length === 0) return;
+          isProcessingRetryChunks = true;
+
+          while (retryChunkQueue.length > 0) {
+            const chunk = retryChunkQueue.shift();
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === msgId
+                  ? { ...msg, text: msg.text + chunk, isStreaming: true }
+                  : msg
+              )
+            );
+            const isInReasoning = isReasoningChunk(accumulatedRetryText, chunk);
+            if (!isInReasoning && retryChunkQueue.length > 0) {
+              await new Promise(resolve => setTimeout(resolve, CHUNK_DELAY_MS));
+            }
+          }
+          isProcessingRetryChunks = false;
+        };
+
         await processStreamingResponse(response, (chunk) => {
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === msgId
-                ? { ...msg, text: msg.text + chunk, isStreaming: true }
-                : msg
-            )
-          );
+          accumulatedRetryText += chunk;
+          retryChunkQueue.push(chunk);
+          processRetryQueuedChunks();
         }, abortController.signal);
+
+        while (retryChunkQueue.length > 0 || isProcessingRetryChunks) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
 
         finishStreaming(msgId);
 
@@ -3595,19 +4101,46 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
         setCompactView(true);
       } else {
         // Full retry for non-partial errors
-        const response = await sendMessageToGrok(lastMessage, messages, userLanguage, streamingConversationId, selectedPersonality, abortController, selectedModel, isAuthenticated, isGuest);
+        const response = await sendMessageToGrok(lastMessage, messages, userLanguage, streamingConversationId, selectedPersonality, abortController, selectedModel, isAuthenticated, isGuest, userName || user?.name, isReasonMode);
         const placeholderId = createBotPlaceholder();
         currentMessageIdRef.current = placeholderId;
 
+        let accumulatedFullRetryText = '';
+        let fullRetryChunkQueue = [];
+        let isProcessingFullRetryChunks = false;
+        const CHUNK_DELAY_MS = 120;
+
+        const processFullRetryQueuedChunks = async () => {
+          if (isProcessingFullRetryChunks || fullRetryChunkQueue.length === 0) return;
+          isProcessingFullRetryChunks = true;
+
+          while (fullRetryChunkQueue.length > 0) {
+            const chunk = fullRetryChunkQueue.shift();
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === placeholderId
+                  ? { ...msg, text: msg.text + chunk }
+                  : msg
+              )
+            );
+            const isInReasoning = isReasoningChunk(accumulatedFullRetryText, chunk);
+            if (!isInReasoning && fullRetryChunkQueue.length > 0) {
+              await new Promise(resolve => setTimeout(resolve, CHUNK_DELAY_MS));
+            }
+          }
+
+          isProcessingFullRetryChunks = false;
+        };
+
         await processStreamingResponse(response, (chunk) => {
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === placeholderId
-                ? { ...msg, text: msg.text + chunk }
-                : msg
-            )
-          );
+          accumulatedFullRetryText += chunk;
+          fullRetryChunkQueue.push(chunk);
+          processFullRetryQueuedChunks();
         }, abortController.signal);
+
+        while (fullRetryChunkQueue.length > 0 || isProcessingFullRetryChunks) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
 
         finishStreaming(placeholderId);
       }
@@ -3651,19 +4184,44 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
     try {
       // Continue from partial response (same as handleRetry but without user error message)
       const continuePrompt = `[Lanjutkan dari mana tadi, jangan ulangi pesan sebelumnya, hanya lanjutkan teks berikutnya]`;
-      const response = await sendMessageToGrok(continuePrompt, messages, userLanguage, streamingConversationId, selectedPersonality, abortController, selectedModel, isAuthenticated, isGuest);
+      const response = await sendMessageToGrok(continuePrompt, messages, userLanguage, streamingConversationId, selectedPersonality, abortController, selectedModel, isAuthenticated, isGuest, userName || user?.name, isReasonMode);
       const msgId = partialMessageIdRef.current;
 
-      await processStreamingResponse(response, (chunk) => {
-        // Update SPECIFIC conversation, not current one
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === msgId
-              ? { ...msg, text: msg.text + chunk, isStreaming: true }
-              : msg
+      let accumulatedAutoRetryText = '';
+      let autoRetryChunkQueue = [];
+      let isProcessingAutoRetryChunks = false;
+      const CHUNK_DELAY_MS = 120;
+
+      const processAutoRetryQueuedChunks = async () => {
+        if (isProcessingAutoRetryChunks || autoRetryChunkQueue.length === 0) return;
+        isProcessingAutoRetryChunks = true;
+
+        while (autoRetryChunkQueue.length > 0) {
+          const chunk = autoRetryChunkQueue.shift();
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === msgId
+                ? { ...msg, text: msg.text + chunk, isStreaming: true }
+                : msg
           )
         );
+          const isInReasoning = isReasoningChunk(accumulatedAutoRetryText, chunk);
+          if (!isInReasoning && autoRetryChunkQueue.length > 0) {
+            await new Promise(resolve => setTimeout(resolve, CHUNK_DELAY_MS));
+          }
+        }
+        isProcessingAutoRetryChunks = false;
+      };
+
+      await processStreamingResponse(response, (chunk) => {
+        accumulatedAutoRetryText += chunk;
+        autoRetryChunkQueue.push(chunk);
+        processAutoRetryQueuedChunks();
       }, abortController.signal);
+
+      while (autoRetryChunkQueue.length > 0 || isProcessingAutoRetryChunks) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
 
       finishStreaming(msgId);
 
@@ -3698,7 +4256,7 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
     if (messages.length === 0) {
       return (
         <div className="welcome-message">
-          <h2>{getTimeBasedGreeting(user?.name)}</h2>
+          <h2>{getTimeBasedGreeting(userName || user?.name)}</h2>
           <p className="welcome-hint">Sebaiknya kita mulai dari mana?</p>
         </div>
       );
@@ -3863,6 +4421,21 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
                 {message.files.map((file) => (
                   <div key={file.id} className="message-file-chip">
                     📎 {file.name}
+                  </div>
+                ))}
+              </div>
+            )}
+            {message.images && message.images.length > 0 && (
+              <div className="message-images">
+                {message.images.map((image) => (
+                  <div key={image.id} className="message-image-chip">
+                    <img
+                      src={image.dataUrl}
+                      alt={image.fileName}
+                      className="message-image-thumbnail"
+                      onClick={() => handleImageClick(image.dataUrl, image.fileName, image.id)}
+                      title={userLanguage === 'id' ? 'Klik untuk membesar' : 'Click to enlarge'}
+                    />
                   </div>
                 ))}
               </div>
@@ -4100,6 +4673,48 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
         </div>
       )}
 
+      {showNameSetupModal && (
+        <div className="modal-overlay" onClick={() => {}}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <button 
+              className="modal-close"
+              onClick={() => setShowNameSetupModal(false)}
+            >
+              ✕
+            </button>
+            <div className="modal-header">
+              <h2>📝 {userLanguage === 'id' ? 'Siapa nama kamu?' : 'What is your name?'}</h2>
+            </div>
+            <div className="modal-body">
+              <p>{userLanguage === 'id' ? 'Supaya Orion bisa manggil kamu dengan nama yang benar.' : 'So Orion can call you by the right name.'}</p>
+              <div className="settings-row">
+                <label>{userLanguage === 'id' ? 'Nama' : 'Name'}</label>
+                <input
+                  type="text"
+                  value={pendingUserName}
+                  onChange={(e) => setPendingUserName(e.target.value)}
+                  placeholder={userLanguage === 'id' ? 'Contoh: Nando' : 'Example: Nando'}
+                />
+              </div>
+              <div className="settings-row modal-actions-row">
+                <button
+                  className="modal-btn-confirm"
+                  onClick={() => saveUserName(pendingUserName)}
+                >
+                  {userLanguage === 'id' ? 'Simpan' : 'Save'}
+                </button>
+                <button
+                  className="modal-btn-cancel"
+                  onClick={skipNameSetup}
+                >
+                  {userLanguage === 'id' ? 'Lewati' : 'Skip'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Settings Modal */}
       {showSettingsModal && (
         <div className="modal-overlay" onClick={() => setShowSettingsModal(false)}>
@@ -4139,6 +4754,29 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
                   <option value="id">Bahasa Indonesia</option>
                   <option value="en">English</option>
                 </select>
+              </div>
+
+              <div className="settings-row">
+                <label>{userLanguage === 'id' ? 'Nama kamu' : 'Your name'}</label>
+                <input
+                  type="text"
+                  className="settings-input"
+                  value={pendingUserName}
+                  onChange={(e) => setPendingUserName(e.target.value)}
+                  placeholder={userLanguage === 'id' ? 'Contoh: Nando' : 'e.g. Nando'}
+                />
+              </div>
+
+              <div className="settings-row">
+                <button
+                  className="modal-btn-confirm"
+                  onClick={() => {
+                    saveUserName(pendingUserName);
+                    setCustomAlert(userLanguage === 'id' ? 'Nama tersimpan' : 'Name saved');
+                  }}
+                >
+                  {userLanguage === 'id' ? 'Simpan Nama' : 'Save Name'}
+                </button>
               </div>
 
               <div className="settings-row">
@@ -4610,16 +5248,6 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
           <button
             className="floating-menu-item"
             onClick={() => {
-              handleToggleTtsMute();
-              setShowFloatingMenu(false);
-            }}
-            title={userLanguage === 'id' ? (isTtsMuted ? 'Nyalakan TTS' : 'Matikan TTS') : (isTtsMuted ? 'Enable TTS' : 'Disable TTS')}
-          >
-            {isTtsMuted ? '🔇' : '🔊'} {userLanguage === 'id' ? (isTtsMuted ? 'Suara (Muted)' : 'Suara (On)') : (isTtsMuted ? 'Voice (Muted)' : 'Voice (On)')}
-          </button>
-          <button
-            className="floating-menu-item"
-            onClick={() => {
               setShowVoiceChat(true);
               setShowFloatingMenu(false);
             }}
@@ -4778,12 +5406,18 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
 
         {/* Custom Alert Notification */}
         {customAlert && (
-          <div className={`custom-alert alert-${customAlert.type}`}>
+          <div className={`custom-alert alert-${customAlert.type}${dismissingAlert ? ' dismissing' : ''}`}>
             <div className="alert-content">
               <span className="alert-message">{customAlert.message}</span>
               <button 
                 className="alert-close"
-                onClick={() => setCustomAlert(null)}
+                onClick={() => {
+                  setDismissingAlert(true);
+                  setTimeout(() => {
+                    setCustomAlert(null);
+                    setDismissingAlert(false);
+                  }, 400);
+                }}
               >
                 ✕
               </button>
@@ -4792,13 +5426,6 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
         )}
 
         <div className="messages-container">
-        {messages.length === 0 && (
-          <div className="welcome-message">
-            <h2>{getTimeBasedGreeting(user?.name)}</h2>
-            <p className="welcome-hint">Sebaiknya kita mulai dari mana?</p>
-          </div>
-        )}
-
         {foundSources.length > 0 && messages.length > 0 && (
           <div className="source-strip sources-above-output" onClick={() => setShowFoundSourcesPanel(true)}>
             <div className="source-strip-header">
@@ -4861,6 +5488,9 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
             className="show-previous-btn"
             onClick={handleShowPreviousMessages}
             title="Lihat pesan sebelumnya"
+            style={{
+              bottom: (uploadedFiles.length + uploadedImages.length > 0 && !attachmentQueueMinimized) ? '235px' : '115px'
+            }}
           >
             📜 Lihat Pesan Sebelumnya
           </button>
@@ -4909,41 +5539,77 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
         </div>
       )}
 
-      {/* Uploaded Files Display */}
-      {uploadedFiles.length > 0 && (
-        <div className="uploaded-files-container">
-          <div className="uploaded-files-header">
-            <span>📁 {uploadedFiles.length} {userLanguage === 'id' ? 'file' : 'file'}{uploadedFiles.length !== 1 ? 's' : ''}</span>
-            <button 
-              className="clear-files-btn"
-              onClick={clearAllUploadedFiles}
-              title={userLanguage === 'id' ? 'Hapus semua file' : 'Clear all files'}
-            >
-              ✕
-            </button>
-          </div>
-          <div className="uploaded-files-list">
-            {uploadedFiles.map(file => (
-              <div key={file.id} className="uploaded-file-chip">
-                <span className="file-icon">📄</span>
-                <div className="file-info">
-                  <span className="file-name">{file.name}</span>
-                  <span className="file-meta">{file.size}KB · {file.tokens} tokens</span>
-                </div>
+      <form className="input-form" onSubmit={handleSendMessage}>
+        {/* Uploaded Attachments Display */}
+        {(uploadedFiles.length > 0 || uploadedImages.length > 0) && (
+          <div className={`uploaded-attachments-container${attachmentQueueMinimized ? ' minimized' : ''}`}>
+            <div className="uploaded-attachments-header">
+              <span>📦 {uploadedFiles.length + uploadedImages.length} {userLanguage === 'id' ? 'lampiran' : 'attachment'}{uploadedFiles.length + uploadedImages.length !== 1 ? 's' : ''}</span>
+              <div className="uploaded-attachments-header-actions">
                 <button
-                  className="remove-file-btn"
-                  onClick={() => removeUploadedFile(file.id)}
-                  title={userLanguage === 'id' ? 'Hapus file' : 'Remove file'}
+                  className="minimize-files-btn"
+                  type="button"
+                  onClick={() => setAttachmentQueueMinimized(!attachmentQueueMinimized)}
+                  title={attachmentQueueMinimized ? (userLanguage === 'id' ? 'Perluas' : 'Expand') : (userLanguage === 'id' ? 'Perkecil' : 'Minimize')}
+                >
+                  {attachmentQueueMinimized ? '▶' : '▼'}
+                </button>
+                <button
+                  className="clear-files-btn"
+                  onClick={clearAllAttachments}
+                  title={userLanguage === 'id' ? 'Hapus semua lampiran' : 'Clear all attachments'}
                 >
                   ✕
                 </button>
               </div>
-            ))}
+            </div>
+            {!attachmentQueueMinimized && (
+              <div className="uploaded-attachments-list">
+                {uploadedFiles.map(file => (
+                  <div key={file.id} className="uploaded-file-chip">
+                    <span className="file-icon">📄</span>
+                    <div className="file-info">
+                      <span className="file-name">{file.name}</span>
+                      <span className="file-meta">{file.size}KB · {file.tokens} tokens</span>
+                    </div>
+                    <button
+                      className="remove-file-btn"
+                      onClick={() => removeUploadedFile(file.id)}
+                      title={userLanguage === 'id' ? 'Hapus file' : 'Remove file'}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+                {uploadedImages.map(image => (
+                  <div key={image.id} className={`uploaded-image-chip status-${image.status}`}>
+                    <div className="image-preview-thumb">
+                      <img src={image.dataUrl} alt={image.fileName} />
+                    </div>
+                    <div className="image-chip-info">
+                      <span className="image-file-name">{image.fileName}</span>
+                      <span className="image-status">
+                        {image.status === 'uploading' && '⬆️ Mengunggah...'}
+                        {image.status === 'queued' && '⏳ Antrian'}
+                        {image.status === 'analyzing' && '🔍 Analisis...'}
+                        {image.status === 'analyzed' && '✅ Siap'}
+                        {image.status === 'error' && `❌ ${image.error || 'Error'}`}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="remove-image-btn"
+                      onClick={() => removeUploadedImage(image.id)}
+                      title={userLanguage === 'id' ? 'Hapus gambar' : 'Remove image'}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-        </div>
-      )}
-
-      <form className="input-form" onSubmit={handleSendMessage}>
+        )}
         {/* Text Queue Display - OUTSIDE input-container, full width */}
         {textQueue.length > 0 && (
           <div className="pasted-text-container">
@@ -4991,11 +5657,16 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
         )}
 
         <div className={`input-container ${getConvLoading() ? 'generating' : ''}`}>
-          {/* File attached indicator */}
-          {uploadedFiles.length > 0 && (
-            <div className="file-attached-badge">
-              📎 {uploadedFiles.length}
-            </div>
+          {/* Attachment badge only when attachment queue is minimized */}
+          {(uploadedFiles.length + uploadedImages.length > 0) && attachmentQueueMinimized && (
+            <button
+              type="button"
+              className="file-attached-badge"
+              onClick={() => setAttachmentQueueMinimized(false)}
+              title={userLanguage === 'id' ? 'Tampilkan kembali lampiran' : 'Show attachments'}
+            >
+              📦 {uploadedFiles.length + uploadedImages.length}
+            </button>
           )}
 
           {/* Hidden file input */}
@@ -5008,6 +5679,20 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
             className="file-upload-input"
             accept=".txt,.csv,.json,.html,.md,.htm"
             onChange={(e) => handleFileUpload(e)}
+            style={{ display: 'none' }}
+          />
+
+          {/* Hidden image input */}
+          <input
+            ref={(input) => {
+              setImageUploadInput(input);
+            }}
+            type="file"
+            id="image-upload-input"
+            className="image-upload-input"
+            accept="image/*"
+            multiple
+            onChange={(e) => handleImageUpload(e)}
             style={{ display: 'none' }}
           />
           
@@ -5037,6 +5722,18 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
                 >
                   <span className="menu-icon">📁</span>
                   {userLanguage === 'id' ? 'Upload File' : 'Upload File'}
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    document.getElementById('image-upload-input')?.click();
+                    setShowInputMenu(false);
+                  }}
+                  disabled={loading}
+                >
+                  <span className="menu-icon">📸</span>
+                  {userLanguage === 'id' ? 'Upload Gambar' : 'Upload Image'}
                 </button>
                 <div className="menu-divider"></div>
                 <button
@@ -5126,12 +5823,10 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
             {getConvLoading() ? (
               <svg className="button-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <line x1="18" y1="6" x2="6" y2="18"></line>
-               ya <line x1="6" y1="6" x2="18" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
               </svg>
             ) : (
-              <svg className="button-icon" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M16.6915026,12.4744748 L3.50612381,13.2599618 C3.19218622,13.2599618 3.03521743,13.4170592 3.03521743,13.5741566 L1.15159189,20.0151496 C0.8376543,20.8006365 0.99,21.89 1.77946707,22.52 C2.41,22.99 3.50612381,23.1 4.13399899,22.8429026 L21.714504,14.0454487 C22.6563168,13.5741566 23.1272231,12.6315722 22.9702544,11.6889879 L4.13399899,1.16865375 C3.34915502,0.9 2.40734225,1.00636533 1.77946707,1.4776575 C0.994623095,2.10604706 0.837654326,3.0486314 1.15159189,3.99721575 L3.03521743,10.4382088 C3.03521743,10.5953061 3.19218622,10.7524035 3.50612381,10.7524035 L16.6915026,11.5378905 C16.6915026,11.5378905 17.1624089,11.5378905 17.1624089,12.0091827 C17.1624089,12.4804748 16.6915026,12.4744748 16.6915026,12.4744748 Z"></path>
-              </svg>
+              <i className="fa-solid fa-arrow-up button-icon" aria-hidden="true"></i>
             )}
           </button>
         </div>

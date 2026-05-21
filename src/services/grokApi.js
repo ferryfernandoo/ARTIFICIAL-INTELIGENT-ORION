@@ -2,6 +2,18 @@
 import { memoryService } from './memoryService.js';
 import { ragService } from './ragService.js';
 
+const isRagRelevantMessage = (message = '') => {
+  if (!message || typeof message !== 'string') return false;
+  const normalized = message.toLowerCase();
+  const triggerTerms = [
+    'orion', 'deepernova', 'deeper nova', 'misi', 'visi', 'fitur', 'produk',
+    'tim', 'donasi', 'panduan', 'dokumen', 'manual', 'spesifikasi', 'roadmap',
+    'company', 'company info', 'knowledge base', 'pengetahuan', 'layanan',
+    'harga', 'pricing', 'kebijakan', 'policy', 'team', 'ceo', 'founder'
+  ];
+  return triggerTerms.some(term => normalized.includes(term));
+};
+
 // Personality profiles for Orion AI with different communication styles
 const PERSONALITIES = {
   formal: {
@@ -16,7 +28,8 @@ GAYA KEPRIBADIAN: FORMAL
 - Gunakan bahasa yang tepat dan formal
 - Fokus pada akurasi dan kredibilitas
 - Jawaban singkat dan efisien
-- Hindari bahasa santai atau slang`,
+- Hindari bahasa santai atau slang
+- Boleh pakai 1-2 emoji ringan untuk membuat jawaban lebih hangat dan tidak kaku`,
   },
   casual: {
     id: 'casual',
@@ -588,16 +601,16 @@ REMEMBER: Best answers are NEAT, HAVE BOLD, HAVE PROPER NEWLINES, HAVE BULLET PO
 };
 
 // Build conversation context from message history
-const buildContextualPrompt = (messages, language = 'id', currentMessage = '', currentConversationId = null, personality = DEFAULT_PERSONALITY) => {
-  const conversationContext = messages
+const buildContextualPrompt = (messages, language = 'id', currentMessage = '', currentConversationId = null, personality = DEFAULT_PERSONALITY, userName = '', isReasonMode = false) => {
+  const recentMessages = messages
     .filter(msg => !msg.isError && !msg.isStreaming && msg.text && msg.sender)
-    .slice(-3)  // Reduced from 5 to 3 for speed
     .map(msg => {
       const sender = msg.sender === 'user' ? 'User' : 'Orion';
       const text = (msg.text && typeof msg.text === 'string') ? msg.text : String(msg.text || '');
-      return `${sender}: ${text.substring(0, 80)}`; // Shorter context
-    })
-    .join('\n');
+      return `${sender}: ${text.substring(0, 120)}`;
+    });
+
+  const conversationContext = recentMessages.length <= 40 ? recentMessages : recentMessages.slice(-40);
 
   const systemPrompt = SYSTEM_PROMPTS[language] || SYSTEM_PROMPTS.id;
   
@@ -614,22 +627,33 @@ const buildContextualPrompt = (messages, language = 'id', currentMessage = '', c
     memoryContext = memoryService.getMemoryContext(currentMessage, currentConversationId, language);
   }
 
-  // Retrieve relevant external documents from RAG index - ONLY HIGH CONFIDENCE (> 0.7)
+  // Retrieve conversation summary memory for the current session
+  let conversationSummaryContext = '';
+  if (currentConversationId) {
+    conversationSummaryContext = memoryService.getConversationSummaryContext(currentConversationId, language, 3);
+  }
+
+  // Retrieve relevant external documents from RAG index only for queries that need company/knowledge-base data
   let ragContext = '';
   if (currentMessage) {
     try {
       const scoredDocs = ragService.searchWithScores(currentMessage, 2); // Reduced from 6 to 2 for speed
-      // FILTER: Only use RAG results with confidence score > 0.7 to avoid hallucination
-      const highConfidenceDocs = scoredDocs.filter(item => item.score > 0.7);
-      
-      if (highConfidenceDocs && highConfidenceDocs.length) {
+      const minScore = isRagRelevantMessage(currentMessage) ? 0.65 : 0.85;
+      const relevantDocs = scoredDocs.filter(item => item.score > minScore);
+
+      if (relevantDocs && relevantDocs.length) {
         ragContext = language === 'id' ? '\n📎 REFERENSI (VERIFIED):\n' : '\n📎 REFERENCES (VERIFIED):\n';
-        highConfidenceDocs.forEach(item => {
+        relevantDocs.forEach(item => {
           const doc = item.doc;
           const title = doc.title || doc.docId || 'Doc';
           const content = String(doc.content || '').substring(0, 150); // Limited content
           ragContext += `• **${title}**: ${content}\n`;
         });
+        if (!isRagRelevantMessage(currentMessage)) {
+          ragContext = `${language === 'id' ? '[NOTA RAG]: Gunakan referensi ini hanya jika sangat relevan dengan topik yang diminta.' : '[RAG NOTE]: Use these references only if they are directly relevant to the requested topic.'}\n${ragContext}`;
+        }
+      } else if (isRagRelevantMessage(currentMessage)) {
+        console.log('[GrokApi] RAG search found no high-confidence docs for a relevant query. Skipping RAG injection.');
       }
     } catch (e) {
       console.error('RAG search error:', e);
@@ -639,11 +663,21 @@ const buildContextualPrompt = (messages, language = 'id', currentMessage = '', c
   // Build final prompt with context and memory
   let finalPrompt = systemPrompt;
   
+  if (userName && userName.trim()) {
+    finalPrompt += language === 'id'
+      ? `\n\n[PENGGUNA]: Nama pengguna saat ini adalah ${userName.trim()}. Panggil dia dengan nama tersebut saat menjawab.`
+      : `\n\n[USER]: The current user's name is ${userName.trim()}. Address them by that name in your replies.`;
+  }
+
   // Add personality-specific system prompt
   const selectedPersonality = PERSONALITIES[personality] || PERSONALITIES[DEFAULT_PERSONALITY];
   if (selectedPersonality && selectedPersonality.systemPromptAppend) {
     finalPrompt += selectedPersonality.systemPromptAppend;
   }
+
+  finalPrompt += language === 'id'
+    ? '\n\n[EMOJI RINGAN]: Untuk jawaban non-reasoning, gunakan 1-2 emoji yang relevan dan natural agar respons tidak terasa kaku. Jangan berlebihan.'
+    : '\n\n[LIGHT EMOJI]: For non-reasoning answers, use 1-2 relevant and natural emojis so the response does not feel stiff. Do not overdo it.';
 
   // Explicit RAG instruction: use external JSON only if relevant, otherwise answer using Orion's general knowledge
   const ragInstruction = language === 'id'
@@ -651,7 +685,7 @@ const buildContextualPrompt = (messages, language = 'id', currentMessage = '', c
     : '\n[DATA - ONLY IF VERIFIED]: References below are high-confidence data (> 70%). Use ONLY if relevant and accurate. DO NOT hallucinate or add details not present. If unsure about accuracy → say "I\'m not certain" instead of guessing.\n';
   finalPrompt += ragInstruction;
   
-  // Append retrieved external docs first (if any), then memory context, then cross-room knowledge
+  // Append retrieved external docs first (if any), then memory context, summaries, and cross-room knowledge
   if (ragContext) {
     finalPrompt += ragContext;
   }
@@ -660,18 +694,34 @@ const buildContextualPrompt = (messages, language = 'id', currentMessage = '', c
     finalPrompt += memoryContext;
   }
 
+  if (conversationSummaryContext) {
+    finalPrompt += conversationSummaryContext;
+  }
+
   const searchMemoryFallback = language === 'id'
     ? '\n\n[UTAMAKAN MEMORI PENCARIAN]: Jika pencarian web terbaru tidak tersedia atau tidak bisa diakses, gunakan hasil pencarian yang sudah tersimpan di memori untuk menjawab. Jika tidak ada memori relevan, katakan dengan jelas bahwa Anda tidak tahu.'
     : '\n\n[USE SEARCH MEMORY]: If latest web search is unavailable or unreachable, use previously stored search results from memory to answer. If no relevant memory exists, clearly say you do not know.';
   finalPrompt += searchMemoryFallback;
+
+  if (!isReasonMode) {
+    finalPrompt += language === 'id'
+      ? '\n\n[HEMAT TOKEN]: Jawab dengan jelas, ringkas, dan hemat token. Jangan menulis panjang lebar jika tidak diminta. Tambahkan 1-2 emoji relevan yang pas agar jawaban tidak terasa kaku.'
+      : '\n\n[TOKEN SAVING]: Answer clearly, concisely, and efficiently. Do not write long explanations unless explicitly requested. Add 1-2 relevant emojis to make the response feel friendly, but do not overdo it.';
+  }
   
   if (crossRoomContext) {
     finalPrompt += crossRoomContext;
   }
   
-  if (conversationContext) {
-    const contextLabel = language === 'id' ? 'KONTEKS CHAT SAAT INI:' : 'CURRENT CHAT CONTEXT:';
-    finalPrompt += `\n\n${contextLabel}\n${conversationContext}`;
+  if (conversationContext.length > 0) {
+    const contextLabel = language === 'id' ? 'RIWAYAT CHAT SAAT INI:' : 'CURRENT CHAT HISTORY:';
+    finalPrompt += `\n\n${contextLabel}\n${conversationContext.join('\n')}`;
+
+    if (messages.length > 40) {
+      finalPrompt += language === 'id'
+        ? '\n\n[Penting]: Jika obrolan panjang, gunakan ringkasan sebelumnya dan konteks 40 pesan terakhir sebagai referensi utama.'
+        : '\n\n[Important]: If the session is long, use previous summaries and the last 40 messages as primary context.';
+    }
   }
 
   // Reinforce bold formatting requirement every time
@@ -778,7 +828,7 @@ const shouldUseBackendProxy = (isAuthenticated, isGuest, message = '') => {
 };
 
 // Function untuk call backend proxy
-const sendMessageViaBackend = async (message, conversationHistory = [], language = 'id', personality = DEFAULT_PERSONALITY, abortController = null, deepernovaModel = 'deepernova-1.2-flash') => {
+const sendMessageViaBackend = async (message, conversationHistory = [], language = 'id', personality = DEFAULT_PERSONALITY, abortController = null, deepernovaModel = 'deepernova-1.2-flash', userName = '', isReasonMode = false) => {
   const contextMessages = conversationHistory
     .slice(-6)
     .map(msg => ({
@@ -792,7 +842,7 @@ const sendMessageViaBackend = async (message, conversationHistory = [], language
   const messages = [
     {
       role: 'system',
-      content: buildContextualPrompt(conversationHistory, language, message, null, personality),
+      content: buildContextualPrompt(conversationHistory, language, message, null, personality, userName, isReasonMode),
     },
     ...contextMessages,
     {
@@ -814,8 +864,10 @@ const sendMessageViaBackend = async (message, conversationHistory = [], language
         body: JSON.stringify({
           model: getDeepseekModel(deepernovaModel),
           messages: messages,
-          temperature: 0.7,
-          max_tokens: 8192,
+          temperature: isReasonMode ? 0.7 : 0.5,
+          max_tokens: isReasonMode ? 8192 : 1200,
+          frequency_penalty: isReasonMode ? 0 : 0.2,
+          presence_penalty: isReasonMode ? 0 : 0.0,
           stream: true,
         }),
       },
@@ -833,7 +885,7 @@ const sendMessageViaBackend = async (message, conversationHistory = [], language
   }
 };
 
-export const sendMessageToGrok = async (message, conversationHistory = [], language = 'id', conversationId = null, personality = DEFAULT_PERSONALITY, abortController = null, deepernovaModel = 'deepernova-1.2-flash', isAuthenticated = false, isGuest = true) => {
+export const sendMessageToGrok = async (message, conversationHistory = [], language = 'id', conversationId = null, personality = DEFAULT_PERSONALITY, abortController = null, deepernovaModel = 'deepernova-1.2-flash', isAuthenticated = false, isGuest = true, userName = '', isReasonMode = false) => {
   let lastError = null;
   const operationStartTime = Date.now();
   
@@ -874,7 +926,7 @@ export const sendMessageToGrok = async (message, conversationHistory = [], langu
       if (shouldUseBackendProxy(isAuthenticated, isGuest, message)) {
         const backendReason = marketQueryRegex.test(message) ? 'finance query' : 'authenticated user';
         console.log(`📊 Using backend proxy (${backendReason})`);
-        response = await sendMessageViaBackend(message, conversationHistory, language, personality, abortController, deepernovaModel);
+        response = await sendMessageViaBackend(message, conversationHistory, language, personality, abortController, deepernovaModel, userName, isReasonMode);
       } else {
         // Guest user: use direct Deepseek API
         if (!DEEPSEEK_API_KEY) {
@@ -895,7 +947,7 @@ export const sendMessageToGrok = async (message, conversationHistory = [], langu
               messages: [
                 {
                   role: 'system',
-                  content: buildContextualPrompt(conversationHistory, language, message, conversationId, personality),
+                  content: buildContextualPrompt(conversationHistory, language, message, conversationId, personality, userName, isReasonMode),
                 },
                 ...contextMessages,
                 {
@@ -903,8 +955,10 @@ export const sendMessageToGrok = async (message, conversationHistory = [], langu
                   content: message,
                 },
               ],
-              temperature: 0.7,
-              max_tokens: 8192,
+              temperature: isReasonMode ? 0.7 : 0.5,
+              max_tokens: isReasonMode ? 8192 : 1200,
+              frequency_penalty: isReasonMode ? 0 : 0.2,
+              presence_penalty: isReasonMode ? 0 : 0.0,
               stream: true,
             }),
           },
@@ -953,7 +1007,28 @@ export const processStreamingResponse = async (response, onChunk, abortSignal = 
   let buffer = ''; // Buffer untuk handle incomplete lines
   let _lastDataReceivedTime = Date.now();
   let streamTimeout = null;
-  
+
+  const splitForSmoothRendering = (text) => {
+    if (!text) return [];
+    const parts = [];
+    let part = '';
+    for (let i = 0; i < text.length; i++) {
+      part += text[i];
+      const nextChar = text[i + 1];
+      if (
+        part.length >= 4 ||
+        nextChar === ' ' ||
+        nextChar === '\n' ||
+        nextChar === undefined
+      ) {
+        parts.push(part);
+        part = '';
+      }
+    }
+    if (part) parts.push(part);
+    return parts;
+  };
+
   // Helper to set connection idle timeout
   const resetIdleTimeout = () => {
     if (streamTimeout) clearTimeout(streamTimeout);
@@ -1014,7 +1089,10 @@ export const processStreamingResponse = async (response, onChunk, abortSignal = 
             const content = parsed.choices?.[0]?.delta?.content || '';
             if (content) {
               fullText += content;
-              onChunk(content); // Call callback for each chunk
+              const smoothChunks = splitForSmoothRendering(content);
+              for (const smoothChunk of smoothChunks) {
+                await onChunk(smoothChunk);
+              }
             }
           } catch (e) {
             // Ignore parse errors for incomplete JSON - might complete in next chunk
@@ -1035,7 +1113,10 @@ export const processStreamingResponse = async (response, onChunk, abortSignal = 
             const content = parsed.choices?.[0]?.delta?.content || '';
             if (content) {
               fullText += content;
-              onChunk(content);
+              const smoothChunks = splitForSmoothRendering(content);
+              for (const smoothChunk of smoothChunks) {
+                await onChunk(smoothChunk);
+              }
             }
           } catch (e) {
             console.debug('Final JSON parse error:', e.message);

@@ -125,6 +125,18 @@ function App() {
     console.log('[App] User signed up and saved to localStorage:', userData.email);
   };
 
+  const handleUpdateUser = (updatedFields) => {
+    setUser((prevUser) => {
+      const nextUser = { ...(prevUser || {}), ...updatedFields };
+      if (isAuthenticated) {
+        localStorage.setItem('authUser', JSON.stringify(nextUser));
+      } else if (isGuest) {
+        localStorage.setItem('guestSession', JSON.stringify(nextUser));
+      }
+      return nextUser;
+    });
+  };
+
   const handleLogout = async () => {
     const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
     try {
@@ -167,7 +179,14 @@ function App() {
   
   return (
     <>
-      <ChatBot user={user} isAuthenticated={isAuthenticated} isGuest={isGuest} onLogout={handleLogout} onNavigate={setCurrentView} />
+      <ChatBot
+        user={user}
+        isAuthenticated={isAuthenticated}
+        isGuest={isGuest}
+        onLogout={handleLogout}
+        onNavigate={setCurrentView}
+        onUpdateUser={handleUpdateUser}
+      />
     </>
   )
 }

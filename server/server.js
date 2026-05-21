@@ -20,7 +20,6 @@ import ragService from './ragService.js';
 import externalFinanceService from './externalFinanceService.js';
 import sourceTracker from './sourceTracker.js';
 import DocumentGeneratorService from './documentGeneratorService.js';
-import webSearchService from './webSearchService.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -146,7 +145,13 @@ const upload = multer({
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'application/vnd.ms-excel',
       'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-      'application/vnd.ms-powerpoint'
+      'application/vnd.ms-powerpoint',
+      // Image formats for vision analysis
+      'image/jpeg',
+      'image/jpg',
+      'image/png',
+      'image/webp',
+      'image/gif'
     ];
     
     if (allowedMimes.includes(file.mimetype) || file.originalname.endsWith('.md') || file.originalname.endsWith('.txt')) {
@@ -159,6 +164,32 @@ const upload = multer({
 
 // Serve generated files
 app.use('/download', express.static(tempDir));
+app.use('/download/uploads', express.static(uploadsDir));
+
+/**
+ * POST /api/vision/upload
+ * Upload an image and return a public URL for vision analysis
+ */
+app.post('/api/vision/upload', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Image file is required' });
+    }
+
+    const fileUrl = `${req.protocol}://${req.get('host')}/download/uploads/${encodeURIComponent(req.file.filename)}`;
+    console.log('[VISION_UPLOAD] Saved image:', req.file.filename);
+    console.log('[VISION_UPLOAD] Public URL:', fileUrl);
+
+    res.json({
+      success: true,
+      url: fileUrl,
+      filename: req.file.filename,
+    });
+  } catch (err) {
+    console.error('[VISION_UPLOAD] Error uploading image:', err);
+    res.status(500).json({ error: 'Vision upload failed: ' + err.message });
+  }
+});
 
 /**
  * Helper functions for parsing different file types
@@ -1025,173 +1056,6 @@ function executeJavaScript(code, outputPath, filename, res) {
 }
 
 /**
- * Web Search + DeepSeek Integration Endpoint
- * POST /api/chat/web-search
- */
-/**
- * Map frontend model names to valid DeepSeek models
- */
-const mapModelToDeepSeek = (modelName) => {
-  const modelMap = {
-    'deepernova-1.2-flash': 'deepseek-chat',
-    'deepernova-2.3-pro': 'deepseek-chat',
-    'deepernova-4.6-giga': 'deepseek-chat',
-    'deepseek-chat': 'deepseek-chat',
-    'deepseek-coder': 'deepseek-coder',
-    'deepseek-v4-pro': 'deepseek-v4-pro'
-  };
-  return modelMap[modelName] || 'deepseek-chat';
-};
-
-/**
- * Validate and normalize language code
- */
-const validateLanguage = (lang) => {
-  const validLanguages = ['id', 'en', 'ja', 'zh', 'es', 'fr', 'de'];
-  return validLanguages.includes(lang) ? lang : 'id';
-};
-
-app.post('/api/chat/web-search', express.json(), async (req, res) => {
-  try {
-    let { query, conversationHistory = [], language = 'id', model = 'deepseek-chat' } = req.body;
-
-    if (!query || typeof query !== 'string' || query.trim().length === 0) {
-      return res.status(400).json({
-        error: 'Query parameter diperlukan',
-        code: 'INVALID_QUERY'
-      });
-    }
-
-    // Normalize model and language
-    const validModel = mapModelToDeepSeek(model);
-    language = validateLanguage(language);
-
-    console.log(`\n[WebSearch] 🔍 Processing web search for: "${query}"`);
-    console.log(`[WebSearch] Language: ${language}, Model: ${model} → ${validModel}`);
-
-    // Step 1: Perform web search
-    console.log('[WebSearch] 📡 Calling SerpAPI...');
-    const searchResult = await webSearchService.searchGoogle(query, 5, language);
-
-    let systemPrompt = '';
-
-    if (searchResult.success && searchResult.results.length > 0) {
-      // Search succeeded - build augmented system prompt
-      console.log(`[WebSearch] ✅ Search succeeded! Found ${searchResult.results.length} results`);
-
-      const searchContext = webSearchService.formatSearchResultsForPrompt(searchResult.results);
-      systemPrompt = `Anda adalah asisten AI yang membantu pengguna Indonesia. Berikut adalah hasil pencarian web terkini untuk pertanyaan mereka:
-
-${searchContext}
-
-Gunakan informasi di atas untuk menjawab pertanyaan pengguna. Berikan jawaban yang informatif, akurat, dan sertakan sumber ketika relevan.`;
-    } else {
-      // Search failed - return error message
-      console.log(`[WebSearch] ❌ Search failed: ${searchResult.error || 'Unknown error'}`);
-      const errorMessage = webSearchService.getErrorMessage();
-      
-      return res.status(503).json({
-        error: errorMessage,
-        code: 'WEB_SEARCH_FAILED',
-        details: searchResult.error,
-        searchPerformed: true,
-        searchSucceeded: false
-      });
-    }
-
-    // Step 2: Send to DeepSeek with augmented context
-    console.log('[WebSearch] 📤 Sending to DeepSeek with search context...');
-
-    // Build messages array
-    const messages = [];
-    
-    // Add system prompt with search results
-    messages.push({
-      role: 'system',
-      content: systemPrompt
-    });
-
-    // Add conversation history - clean up format for API
-    if (Array.isArray(conversationHistory) && conversationHistory.length > 0) {
-      for (const histMessage of conversationHistory) {
-        // Extract only role and content, filter out custom fields
-        const cleanMessage = {
-          role: histMessage.sender === 'user' ? 'user' : 'assistant',
-          content: histMessage.text || histMessage.content || ''
-        };
-        if (cleanMessage.content) {
-          messages.push(cleanMessage);
-        }
-      }
-    }
-
-    // Add current user query
-    messages.push({
-      role: 'user',
-      content: query
-    });
-
-    // Call DeepSeek API with validated model
-    const deepseekResponse = await fetch(DEEPSEEK_API_URL, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: validModel,  // Use mapped model, never trust frontend model name
-        messages: messages,
-        temperature: 0.7,
-        max_tokens: 2048,
-        stream: false
-      })
-    });
-
-    if (!deepseekResponse.ok) {
-      console.error(`[WebSearch] ❌ DeepSeek error: ${deepseekResponse.status}`);
-      return res.status(deepseekResponse.status).json({
-        error: 'Maaf, terjadi kesalahan saat memproses jawaban. Silahkan coba lagi.',
-        code: 'DEEPSEEK_ERROR'
-      });
-    }
-
-    const deepseekData = await deepseekResponse.json();
-
-    // Extract answer from DeepSeek
-    const answer = deepseekData.choices?.[0]?.message?.content || '';
-
-    if (!answer) {
-      console.warn('[WebSearch] ⚠️  DeepSeek returned empty answer');
-      return res.status(500).json({
-        error: 'DeepSeek returned empty response',
-        code: 'EMPTY_RESPONSE'
-      });
-    }
-
-    console.log(`[WebSearch] ✅ SUCCESS! Got answer from DeepSeek (${answer.length} chars)`);
-
-    // Return successful response
-    return res.json({
-      success: true,
-      query: query,
-      answer: answer,
-      searchResults: searchResult.results,
-      model: model,
-      language: language,
-      searchPerformed: true,
-      searchSucceeded: true
-    });
-
-  } catch (error) {
-    console.error('[WebSearch] ❌ Endpoint error:', error);
-    return res.status(500).json({
-      error: error.message || 'Internal server error',
-      code: 'SERVER_ERROR'
-    });
-  }
-});
-
-/**
  * List generated files
  */
 app.get('/api/files', (req, res) => {
@@ -1410,6 +1274,38 @@ app.get('/auth/me', (req, res) => {
 
   console.log(`[AUTH/ME] Authenticated user: ${userWithoutPassword.email}`);
   res.json({ authenticated: true, user: userWithoutPassword });
+});
+
+// Update current user profile (persist name)
+app.put('/auth/me', (req, res) => {
+  if (req.session.isGuest) {
+    return res.status(403).json({ error: 'Guests cannot update profile.' });
+  }
+
+  if (!req.isAuthenticated()) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const displayName = String(req.body.name || '').trim();
+  if (!displayName) {
+    return res.status(400).json({ error: 'Nama tidak boleh kosong.' });
+  }
+
+  try {
+    const updatedUser = userDb.update(req.user.id, { name: displayName });
+    const userWithoutPassword = {
+      id: updatedUser.id,
+      email: updatedUser.email,
+      name: updatedUser.name,
+      picture: updatedUser.picture,
+      createdAt: updatedUser.createdAt
+    };
+
+    res.json({ success: true, user: userWithoutPassword });
+  } catch (error) {
+    console.error('[AUTH/UPDATE_PROFILE] Error updating user name:', error);
+    res.status(500).json({ error: 'Gagal menyimpan nama. Coba lagi nanti.' });
+  }
 });
 
 // Logout
@@ -2106,40 +2002,6 @@ app.get('/api/sources/:conversationId/:sourceId', (req, res) => {
 });
 
 /**
- * POST /api/sources/:conversationId/add-web-search
- * Add web search sources to conversation
- */
-app.post('/api/sources/:conversationId/add-web-search', express.json(), (req, res) => {
-  try {
-    const { conversationId } = req.params;
-    const { query, results } = req.body;
-    
-    if (!query || !results || !Array.isArray(results)) {
-      return res.status(400).json({
-        success: false,
-        error: 'query and results array are required'
-      });
-    }
-    
-    sourceTracker.addWebSearchSources(conversationId, query, results);
-    const sources = sourceTracker.getUniqueSources(conversationId);
-    
-    res.json({
-      success: true,
-      conversationId,
-      sources: sources,
-      count: sources.length
-    });
-  } catch (error) {
-    console.error('[Add sources error]:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-/**
  * DELETE /api/sources/:conversationId
  * Clear all sources for a conversation
  */
@@ -2559,6 +2421,115 @@ app.post('/api/images/generate', async (req, res) => {
   }
 });
 
+// ============== VISION ANALYSIS API ==============
+
+const TOKENMIX_CHAT_URL = 'https://api.tokenmix.ai/v1/chat/completions';
+
+/**
+ * POST /api/vision/analyze
+ * Analyze image content using Tokenmix Qwen3-VL Flash
+ * Body: { imageUrl: string, question: string }
+ */
+app.post('/api/vision/analyze', async (req, res) => {
+  try {
+    const { imageUrl, question = 'What is in this image? Describe briefly.' } = req.body;
+
+    if (!imageUrl) {
+      return res.status(400).json({ error: 'imageUrl is required' });
+    }
+
+    if (!TOKENMIX_API_KEY) {
+      console.error('[VISION] TOKENMIX_API_KEY not configured');
+      return res.status(500).json({ error: 'Vision analysis service not configured' });
+    }
+
+    console.log('[VISION] Analyzing image with Qwen3-VL Flash');
+    console.log('[VISION] Image input type:', imageUrl.substring(0, 20));
+    console.log('[VISION] Question:', question.substring(0, 100));
+    console.log('[VISION] API Key configured:', !!TOKENMIX_API_KEY);
+
+    // Build image content - Tokenmix accepts data URIs in image_url field
+    let imageContent = null;
+    if (imageUrl.startsWith('data:')) {
+      // Data URL format for base64
+      imageContent = {
+        type: 'image_url',
+        image_url: { url: imageUrl }
+      };
+      console.log('[VISION] Using base64 data URI');
+    } else if (imageUrl.startsWith('https://')) {
+      // Public HTTPS URL
+      imageContent = {
+        type: 'image_url',
+        image_url: { url: imageUrl }
+      };
+      console.log('[VISION] Using public HTTPS URL');
+    } else {
+      throw new Error('Image must be either base64 data URL or public HTTPS URL');
+    }
+
+    // Try flat content format instead of nested array
+    // Some APIs prefer: { type: 'image_url', image_url: {...} } as separate item
+    const messageContent = [
+      { type: 'text', text: question },
+      imageContent
+    ];
+
+    console.log('[VISION] Message content structure:', JSON.stringify(messageContent, null, 2));
+
+    // Call Tokenmix Qwen3-VL Flash for vision analysis
+    const payload = {
+      model: 'qwen3-vl-flash',
+      messages: [
+        {
+          role: 'user',
+          content: messageContent
+        }
+      ],
+      max_tokens: 200,
+      temperature: 0.5,
+    };
+
+    console.log('[VISION] Payload being sent to Tokenmix:');
+    console.log('[VISION] Full payload:', JSON.stringify(payload, null, 2));
+    console.log('[VISION] Messages structure:', JSON.stringify(payload.messages, null, 2));
+
+    const visionResponse = await fetch(TOKENMIX_CHAT_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${TOKENMIX_API_KEY}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!visionResponse.ok) {
+      const errorText = await visionResponse.text();
+      console.error('[VISION] Tokenmix API error:', visionResponse.status, visionResponse.statusText);
+      console.error('[VISION] Error response body:', errorText.substring(0, 500));
+      throw new Error(`Tokenmix Vision API error: ${visionResponse.status} ${visionResponse.statusText} - ${errorText.substring(0, 200)}`);
+    }
+
+    const visionData = await visionResponse.json();
+    console.log('[VISION] Analysis complete');
+    console.log('[VISION] Response keys:', Object.keys(visionData));
+
+    // Extract analysis from response
+    const analysis = visionData.choices?.[0]?.message?.content || 'Unable to analyze image';
+    
+    res.json({
+      success: true,
+      analysis: analysis,
+      model: 'qwen3-vl-flash',
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[VISION] Image analysis error:', err.message);
+    console.error('[VISION] Full error stack:', err.stack);
+    res.status(500).json({ error: 'Failed to analyze image: ' + err.message });
+  }
+});
+
 /**
  * GET /api/images/session/:sessionId
  * Get all images generated in a specific session
@@ -2719,168 +2690,6 @@ app.get('/api/user/rate-limit', (req, res) => {
   } catch (err) {
     console.error('[RATE_LIMIT] Error:', err);
     res.status(500).json({ error: 'Failed to check rate limit: ' + err.message });
-  }
-});
-
-// ============ RESEARCH ENDPOINTS ============
-
-// Smart research with caching decision
-app.post('/api/research/smart-search', express.json(), async (req, res) => {
-  try {
-    const { query, userId, options = {} } = req.body;
-
-    if (!query || !userId) {
-      return res.status(400).json({ error: 'Query and userId required' });
-    }
-
-    const { researchService } = await import('./researchService.js');
-    const result = await researchService.smartResearch(query, userId, options);
-
-    res.json({
-      success: true,
-      result,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error('[RESEARCH] Smart search error:', error.message);
-    res.status(500).json({
-      error: 'Research failed: ' + error.message,
-      success: false
-    });
-  }
-});
-
-// Get research memory (cached searches)
-app.get('/api/research/memory/:userId', express.json(), async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { category, limit = 50 } = req.query;
-
-    const { researchMemoryDb } = await import('./database.js');
-
-    let results;
-    if (category) {
-      results = researchMemoryDb.findByCategory(userId, category);
-    } else {
-      results = researchMemoryDb.findByUser(userId, parseInt(limit));
-    }
-
-    res.json({
-      success: true,
-      results,
-      count: results.length,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error('[RESEARCH] Memory fetch error:', error.message);
-    res.status(500).json({
-      error: 'Failed to fetch research memory: ' + error.message,
-      success: false
-    });
-  }
-});
-
-// Direct SerpAPI search (without caching decision)
-app.post('/api/research/direct-search', express.json(), async (req, res) => {
-  try {
-    const { query, options = {} } = req.body;
-
-    if (!query) {
-      return res.status(400).json({ error: 'Query required' });
-    }
-
-    const { researchService } = await import('./researchService.js');
-    const result = await researchService.search(query, options);
-
-    res.json({
-      success: true,
-      result,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error('[RESEARCH] Direct search error:', error.message);
-    res.status(500).json({
-      error: 'Search failed: ' + error.message,
-      success: false
-    });
-  }
-});
-
-// Format search results for AI context
-app.post('/api/research/format-context', express.json(), async (req, res) => {
-  try {
-    const { searchData, maxTokens = 3000 } = req.body;
-
-    if (!searchData) {
-      return res.status(400).json({ error: 'searchData required' });
-    }
-
-    const { researchService } = await import('./researchService.js');
-    const formatted = researchService.formatForAIContext(searchData, maxTokens);
-
-    res.json({
-      success: true,
-      formatted,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error('[RESEARCH] Format context error:', error.message);
-    res.status(500).json({
-      error: 'Format failed: ' + error.message,
-      success: false
-    });
-  }
-});
-
-// Get comprehensive research prompt
-app.post('/api/research/generate-prompt', express.json(), async (req, res) => {
-  try {
-    const { query, searchData, cachedContext = '' } = req.body;
-
-    if (!query || !searchData) {
-      return res.status(400).json({ error: 'Query and searchData required' });
-    }
-
-    const { buildResearchPrompt, formatSourcesForDisplay, generateResearchSummary } = 
-      await import('./researchPrompts.js');
-
-    const prompt = buildResearchPrompt(query, searchData, cachedContext);
-    const sources = formatSourcesForDisplay(searchData);
-    const summary = generateResearchSummary(searchData);
-
-    res.json({
-      success: true,
-      prompt,
-      sources,
-      summary,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error('[RESEARCH] Prompt generation error:', error.message);
-    res.status(500).json({
-      error: 'Prompt generation failed: ' + error.message,
-      success: false
-    });
-  }
-});
-
-// Cleanup expired research memory
-app.post('/api/research/cleanup', express.json(), async (req, res) => {
-  try {
-    const { researchMemoryDb } = await import('./database.js');
-    const cleaned = researchMemoryDb.cleanExpired();
-
-    res.json({
-      success: true,
-      cleanedRecords: cleaned,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error('[RESEARCH] Cleanup error:', error.message);
-    res.status(500).json({
-      error: 'Cleanup failed: ' + error.message,
-      success: false
-    });
   }
 });
 

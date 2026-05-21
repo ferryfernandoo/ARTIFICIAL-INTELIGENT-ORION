@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+.env.*.local
+*.log
+server/server.log
+server/temp-files/
+*.db-shm
+*.db-wal
+.DS_Store
+.vscode/
+.idea/

@@ -319,6 +319,100 @@ class MemoryService {
   }
 
   /**
+   * Create a short summary for a block of conversation messages
+   */
+  createConversationSummaryBlock(messages, blockIndex = 0, language = 'en') {
+    const userTexts = messages
+      .filter(msg => msg.sender === 'user' && msg.text)
+      .map(msg => msg.text.trim())
+      .join(' ');
+    const aiTexts = messages
+      .filter(msg => msg.sender !== 'user' && msg.text)
+      .map(msg => msg.text.trim())
+      .join(' ');
+    
+    const trimmedUser = userTexts.split(/[.?!]\s*/)[0].trim();
+    const trimmedAi = aiTexts.split(/[.?!]\s*/).filter(Boolean).slice(-1)[0] || '';
+    const keywords = this.extractKeywords(`${userTexts} ${aiTexts}`).slice(0, 6);
+    const topic = keywords.length ? keywords.join(', ') : (language === 'id' ? 'topik penting' : 'important topic');
+    const userSummary = trimmedUser.length > 120 ? `${trimmedUser.substring(0, 117)}...` : trimmedUser;
+    const aiSummary = trimmedAi.length > 120 ? `${trimmedAi.substring(0, 117)}...` : trimmedAi;
+    
+    if (!userSummary && !aiSummary) return null;
+    
+    if (language === 'id') {
+      return `Ringkasan 10 chat #${blockIndex + 1}: User menanyakan "${userSummary || 'topik percakapan'}". Orion menjawab dengan fokus pada ${topic}.`;
+    }
+    return `Summary of 10 chats #${blockIndex + 1}: User asked "${userSummary || 'the topic'}". Orion answered focusing on ${topic}.`;
+  }
+
+  /**
+   * Save chunk summaries into memory for the current conversation
+   */
+  processConversationSummaries(messages, conversationId, language = 'en') {
+    if (!conversationId || !messages || !messages.length) return 0;
+
+    const textMessages = messages.filter(msg => msg.text && msg.sender);
+    if (textMessages.length < 10) return 0;
+
+    const blockCount = Math.floor(textMessages.length / 10);
+    let savedCount = 0;
+
+    for (let i = 0; i < blockCount; i++) {
+      const blockMessages = textMessages.slice(i * 10, (i + 1) * 10);
+      if (blockMessages.length < 8) continue;
+
+      const summaryText = this.createConversationSummaryBlock(blockMessages, i, language);
+      if (!summaryText) continue;
+
+      const alreadySaved = this.memories.some(mem => mem.conversationId === conversationId && mem.type === 'summary' && mem.content === summaryText);
+      if (alreadySaved) continue;
+
+      this.addMemory({
+        type: 'summary',
+        content: summaryText,
+        weight: 0.95,
+        keywords: this.extractKeywords(summaryText),
+      }, conversationId, language);
+
+      savedCount += 1;
+    }
+
+    return savedCount;
+  }
+
+  /**
+   * Get conversation summaries for current conversation
+   */
+  getConversationSummaries(conversationId, limit = 3) {
+    if (!conversationId) return [];
+
+    return this.memories
+      .filter(mem => mem.conversationId === conversationId && mem.type === 'summary')
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, limit);
+  }
+
+  /**
+   * Get formatted summary context for current conversation
+   */
+  getConversationSummaryContext(conversationId, language = 'en', limit = 3) {
+    const summaries = this.getConversationSummaries(conversationId, limit);
+    if (summaries.length === 0) return '';
+
+    let context = language === 'id'
+      ? '\n📌 RINGKASAN CHAT SEBELUMNYA:\n'
+      : '\n📌 PREVIOUS CHAT SUMMARIES:\n';
+
+    summaries.forEach(mem => {
+      const summaryText = mem.content.substring(0, 120) + (mem.content.length > 120 ? '...' : '');
+      context += `• ${summaryText}\n`;
+    });
+
+    return context;
+  }
+
+  /**
    * Get memory context for current conversation
    * Returns relevant memories formatted for prompt, including prior search results
    */
@@ -344,6 +438,7 @@ class MemoryService {
         preference: language === 'id' ? 'Preferensi Pengguna' : 'User Preferences',
         fact: language === 'id' ? 'Fakta Penting' : 'Important Facts',
         pattern: language === 'id' ? 'Pola/Kebiasaan' : 'Patterns/Habits',
+        summary: language === 'id' ? 'Ringkasan Obrolan' : 'Chat Summaries',
         context: language === 'id' ? 'Konteks Lainnya' : 'Other Context',
         search: language === 'id' ? 'Hasil Pencarian Web' : 'Search Results'
       }[type] || type;
@@ -370,7 +465,12 @@ class MemoryService {
       this.addMemory(mem, conversationId, language);
     });
     
-    return extracted.length;
+    const summaryCount = this.processConversationSummaries(messages, conversationId, language);
+    if (summaryCount > 0) {
+      console.log(`[MemoryService] Saved ${summaryCount} chat summary memory blocks for conversation ${conversationId}`);
+    }
+    
+    return extracted.length + summaryCount;
   }
 
   /**

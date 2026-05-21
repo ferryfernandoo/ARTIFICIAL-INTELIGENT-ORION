@@ -50,18 +50,36 @@ class ConversationPersistenceService {
       if (saved && saved.trim()) {
         try {
           const convs = JSON.parse(saved);
+          const sizeInMB = (saved.length / 1024 / 1024).toFixed(2);
+          console.log(`[ConversationPersistence] 📦 Loaded ${sizeInMB}MB from localStorage`);
+          
           if (Array.isArray(convs) && convs.length > 0) {
             const validConvs = convs.filter(c => c && c.id && c.messages !== undefined);
             if (validConvs.length > 0) {
-              return validConvs.map((conv) => ({
-                ...conv,
-                messages: Array.isArray(conv.messages)
-                  ? conv.messages.map((msg) => ({
-                      ...msg,
-                      timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
-                    }))
-                  : [],
-              }));
+              const result = validConvs.map((conv) => {
+                const processedConv = {
+                  ...conv,
+                  messages: Array.isArray(conv.messages)
+                    ? conv.messages.map((msg) => {
+                        const processedMsg = {
+                          ...msg,
+                          timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
+                        };
+                        // Ensure images array is preserved from message object
+                        if (msg.images && Array.isArray(msg.images)) {
+                          processedMsg.images = msg.images;
+                          console.log(`[ConversationPersistence] ✓ Restored message with ${msg.images.length} images`);
+                        }
+                        return processedMsg;
+                      })
+                    : [],
+                };
+                const totalImages = processedConv.messages.reduce((sum, m) => sum + (m.images?.length || 0), 0);
+                console.log(`[ConversationPersistence] Loaded conv "${processedConv.title}": ${processedConv.messages.length} messages, ${totalImages} total images`);
+                return processedConv;
+              });
+              console.log(`[ConversationPersistence] ✅ Successfully loaded ${result.length} conversations with images intact`);
+              return result;
             }
           }
         } catch (parseErr) {
@@ -90,10 +108,28 @@ class ConversationPersistenceService {
                 console.warn('Invalid conversation structure:', conv);
                 return null;
               }
+              // Preserve full message structure including images
+              const processedMessages = conv.messages.map(msg => {
+                const processedMsg = {
+                  ...msg,
+                };
+                // Ensure images are preserved in message
+                if (msg.images && Array.isArray(msg.images)) {
+                  processedMsg.images = msg.images;
+                  const imageCount = msg.images.length;
+                  const totalSize = msg.images.reduce((sum, img) => sum + (img.dataUrl?.length || 0), 0);
+                  console.log(`[ConversationPersistence] Saving message with ${imageCount} images (${(totalSize / 1024 / 1024).toFixed(2)}MB)`);
+                }
+                return processedMsg;
+              });
+              
+              const totalImageCount = processedMessages.reduce((sum, msg) => sum + (msg.images?.length || 0), 0);
+              console.log(`[ConversationPersistence] Saving conversation "${conv.title}" (${processedMessages.length} messages, ${totalImageCount} images)`);
+              
               return {
                 id: conv.id,
                 title: conv.title,
-                messages: Array.isArray(conv.messages) ? conv.messages : [],
+                messages: processedMessages,
                 createdAt: conv.createdAt || new Date().toISOString(),
                 updatedAt: conv.updatedAt || new Date().toISOString(),
                 isPrivate: conv.isPrivate || false,
@@ -103,14 +139,18 @@ class ConversationPersistenceService {
 
           if (validConversations.length > 0) {
             const jsonString = JSON.stringify(validConversations);
+            const sizeInMB = (jsonString.length / 1024 / 1024).toFixed(2);
+            console.log(`[ConversationPersistence] Total save size: ${sizeInMB}MB`);
+            
             // Check size (localStorage usually has 5-10MB limit)
             if (jsonString.length > 5000000) {
-              console.warn('Conversations too large, keeping only last 20');
+              console.warn(`Conversations too large (${sizeInMB}MB), keeping only last 20`);
               const trimmed = validConversations.slice(-20);
               localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
             } else {
               localStorage.setItem(STORAGE_KEY, jsonString);
             }
+            console.log(`[ConversationPersistence] ✅ Saved ${validConversations.length} conversations to localStorage`);
           }
         }
       }

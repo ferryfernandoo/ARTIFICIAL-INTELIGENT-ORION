@@ -129,6 +129,29 @@ export function initializeDatabase() {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_images_user ON generated_images(userId)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_images_created ON generated_images(createdAt)`);
 
+  // Uploaded images table (persistent storage for user-uploaded images in chat)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS uploaded_images (
+      id TEXT PRIMARY KEY,
+      messageId TEXT,
+      sessionId TEXT NOT NULL,
+      userId TEXT,
+      fileName TEXT NOT NULL,
+      imageData TEXT NOT NULL,
+      mimeType TEXT DEFAULT 'image/jpeg',
+      size INTEGER,
+      analysis TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (sessionId) REFERENCES chat_sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY (userId) REFERENCES users(id) ON DELETE SET NULL
+    )
+  `);
+
+  // Index for faster queries on uploaded images
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_uploaded_images_session ON uploaded_images(sessionId)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_uploaded_images_user ON uploaded_images(userId)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_uploaded_images_message ON uploaded_images(messageId)`);
+
   // Long-term memory table (stores knowledge/conclusions about user across sessions)
   db.exec(`
     CREATE TABLE IF NOT EXISTS memory_long_term (
@@ -664,6 +687,66 @@ export const researchMemoryDb = {
     const stmt = db.prepare('UPDATE research_memory SET confidence = ?, lastUpdated = CURRENT_TIMESTAMP WHERE id = ?');
     stmt.run(confidence, id);
     return researchMemoryDb.findById(id);
+  }
+};
+
+// Uploaded images operations (user-uploaded images in chat)
+export const uploadedImageDb = {
+  create: (id, messageId, sessionId, userId, fileName, imageData, mimeType, size) => {
+    const stmt = db.prepare(`
+      INSERT INTO uploaded_images 
+      (id, messageId, sessionId, userId, fileName, imageData, mimeType, size, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `);
+    stmt.run(id, messageId || null, sessionId, userId || null, fileName, imageData, mimeType, size);
+    return uploadedImageDb.findById(id);
+  },
+
+  findById: (id) => {
+    const stmt = db.prepare('SELECT * FROM uploaded_images WHERE id = ?');
+    return stmt.get(id);
+  },
+
+  findByMessageId: (messageId) => {
+    const stmt = db.prepare('SELECT * FROM uploaded_images WHERE messageId = ? ORDER BY createdAt ASC');
+    return stmt.all(messageId);
+  },
+
+  findBySessionId: (sessionId) => {
+    const stmt = db.prepare(`
+      SELECT * FROM uploaded_images 
+      WHERE sessionId = ? 
+      ORDER BY createdAt DESC
+    `);
+    return stmt.all(sessionId);
+  },
+
+  findByUserId: (userId, limit = 100) => {
+    const stmt = db.prepare(`
+      SELECT * FROM uploaded_images 
+      WHERE userId = ? 
+      ORDER BY createdAt DESC 
+      LIMIT ?
+    `);
+    return stmt.all(userId, limit);
+  },
+
+  updateAnalysis: (id, analysis) => {
+    const stmt = db.prepare('UPDATE uploaded_images SET analysis = ? WHERE id = ?');
+    stmt.run(analysis, id);
+    return uploadedImageDb.findById(id);
+  },
+
+  delete: (id) => {
+    const stmt = db.prepare('DELETE FROM uploaded_images WHERE id = ?');
+    stmt.run(id);
+    return true;
+  },
+
+  deleteByMessageId: (messageId) => {
+    const stmt = db.prepare('DELETE FROM uploaded_images WHERE messageId = ?');
+    const result = stmt.run(messageId);
+    return result.changes;
   }
 };
 

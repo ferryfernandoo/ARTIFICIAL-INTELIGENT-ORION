@@ -81,7 +81,7 @@ class TokenMixTtsService {
       // Check cache first
       const cacheKey = `${this.generateHash(text)}_${selectedVoice}`;
       if (this.cache.has(cacheKey)) {
-        console.log('[TTS] 📦 Using cached audio for:', text.substring(0, 50));
+        console.log('[TTS] � Using cached audio for:', text.substring(0, 50));
         return this.cache.get(cacheKey);
       }
 
@@ -103,7 +103,7 @@ class TokenMixTtsService {
           'Authorization': `Bearer ${import.meta.env.VITE_TOKENMIX_API_KEY || ''}`
         },
         body: JSON.stringify({
-          model: 'tts-1-hd',
+          model: 'tts-1',
           input: truncatedText,
           voice: selectedVoice
         })
