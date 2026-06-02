@@ -627,7 +627,7 @@ PYTHON CODE (NO EXPLANATIONS):`;
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.DEEPSEEK_API_KEY || process.env.VITE_DEEPSEEK_API_KEY}`
+          'Authorization': `Bearer ${this.DEEPSEEK_API}`
         },
         body: JSON.stringify({
           model: 'deepseek-chat',
