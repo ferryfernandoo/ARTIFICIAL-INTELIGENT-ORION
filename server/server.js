@@ -841,6 +841,12 @@ app.post('/api/agent/execute', async (req, res) => {
     // Execute task in sandbox
     const result = await agentService.executeTask(task, userId);
 
+    // Add downloadUrl if file was generated
+    if (result.fileName) {
+      result.downloadUrl = `/download/${encodeURIComponent(result.fileName)}`;
+      console.log(`[API/AGENT] Generated file: ${result.fileName} → ${result.downloadUrl}`);
+    }
+
     // Return execution result
     res.json({
       success: result.status === 'success',
@@ -912,8 +918,8 @@ app.get('/api/download/:userId/:filename', (req, res) => {
       return res.status(400).json({ error: 'Invalid userId or filename' });
     }
     
-    // Construct safe file path - NOTE: sandbox is at /server/server/sandbox, not /server/sandbox
-    const sandboxDir = path.join(__dirname, 'server', 'sandbox', userId);
+    // Construct safe file path - use process.cwd() to match agentService
+    const sandboxDir = path.join(process.cwd(), 'server', 'sandbox', userId);
     const filePath = path.join(sandboxDir, filename);
     
     // Verify file exists and is within sandbox directory
