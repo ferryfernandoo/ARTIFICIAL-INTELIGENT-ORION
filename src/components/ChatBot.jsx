@@ -3005,14 +3005,15 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
     
     // Extract markdown tables
     const tableBlocks = [];
-    // Better regex untuk markdown table: minimal 2 rows dengan | separators
-    processedText = processedText.replace(/(\|.+\|(?:\n|\r\n))+/g, (match) => {
-      // Validate it's actually a table (has at least header + separator or data rows)
-      const lines = match.split(/\n|\r\n/).filter(line => line.trim());
+    // Better regex untuk markdown table: captures complete table blocks (header + separator + data rows)
+    // Matches: | col | col | \n |---|---| \n | data | data |
+    processedText = processedText.replace(/\n([ \t]*\|.+\|[ \t]*\n)+/g, (match) => {
+      const lines = match.trim().split(/\n|\r\n/).filter(line => line.trim());
+      // Must have at least: header row + separator row, OR header + data rows
       if (lines.length >= 2 && lines.every(line => line.includes('|'))) {
         const tableIndex = tableBlocks.length;
-        tableBlocks.push({ type: 'table', content: match });
-        return `__TABLE_BLOCK_${tableIndex}__`;
+        tableBlocks.push({ type: 'table', content: match.trim() });
+        return `\n__TABLE_BLOCK_${tableIndex}__\n`;
       }
       return match; // Return original if not a valid table
     });
@@ -3169,38 +3170,43 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
         const lines = tableData.content
           .trim()
           .split(/\n|\r\n/)
-          .filter(line => line.trim());
+          .map(line => line.trim())
+          .filter(line => line.trim() && line.includes('|'));
         
-        // Helper function to clean markdown from table cells
-        const cleanTableCell = (cell) => {
-          return cell
-            .replace(/\*\*([^*]+)\*\*/g, '$1')
-            .replace(/\*(.*?)\*/g, '$1')
-            .replace(/__(.*?)__/g, '$1')
-            .replace(/_(.*?)_/g, '$1')
-            .replace(/~~(.*?)~~/g, '$1')
-            .replace(/`([^`]+)`/g, '$1')
-            .trim();
+        // Helper function to parse table row
+        const parseTableRow = (line) => {
+          // Split by | and filter out leading/trailing empty cells
+          return line
+            .split('|')
+            .slice(1, -1) // Remove first and last empty cells from split
+            .map(cell => {
+              // Clean markdown from cells
+              return cell
+                .replace(/\*\*([^*]+)\*\*/g, '$1') // bold
+                .replace(/\*([^*]+)\*/g, '$1') // italic
+                .replace(/__(.*?)__/g, '$1') // bold underscore
+                .replace(/_(.*?)_/g, '$1') // italic underscore
+                .replace(/~~(.*?)~~/g, '$1') // strikethrough
+                .replace(/`([^`]+)`/g, '$1') // inline code
+                .trim();
+            })
+            .filter(cell => cell !== '');
         };
         
-        // Parse rows - each line is a row
-        const rows = lines.map(line => 
-          line
-            .split('|')
-            .map(cell => cleanTableCell(cell))
-            .filter(cell => cell && cell !== '')
-        ).filter(row => row.length > 0);
+        // Parse all rows
+        const allRows = lines.map(parseTableRow).filter(row => row.length > 0);
 
-        if (rows.length >= 2) {
-          // First row is always header
-          const headerRow = rows[0];
+        if (allRows.length >= 1) {
+          // First row is header
+          const headerRow = allRows[0];
           
-          // Check if second row is separator (all dashes/colons)
-          const isSeparatorRow = rows[1].every(cell => /^[-:\s]*$/.test(cell));
+          // Check if second row is separator (dashes/colons only)
+          const isSeparatorRow = allRows.length > 1 && 
+            allRows[1].every(cell => /^[-:\s]*$/.test(cell));
           
-          // Data rows start from index 1 (or 2 if separator exists)
+          // Data rows start after header (and separator if exists)
           const dataStartIndex = isSeparatorRow ? 2 : 1;
-          const dataRows = rows.slice(dataStartIndex);
+          const dataRows = allRows.slice(dataStartIndex);
 
           result.push(
             <div key={`table-${tableMatch[1]}`} className="table-container">
