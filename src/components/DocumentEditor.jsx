@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import './DocumentEditor.css';
 import { sendMessageToGrok } from '../services/grokApi';
-import { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel, TabStopPosition, TabStopType } from 'docx';
+import { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel, TabStopPosition, TabStopType, Table, TableRow, TableCell, VerticalAlign } from 'docx';
 import * as XLSX from 'xlsx';
 import PptxGenJS from 'pptxgenjs';
+import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 // ===== CELL FORMAT MODEL =====
 const defaultCellFormat = () => ({
@@ -32,8 +33,8 @@ const createSheet = (name, rows = 10, cols = 8) => ({
   rowHeights: Array(rows).fill(32),
 });
 
-const DocumentEditor = ({ _user, onNavigate }) => {
-  const [editorType, setEditorType] = useState('docx');
+const DocumentEditor = ({ _user, onNavigate, documentType = 'docx' }) => {
+  const [editorType, setEditorType] = useState(documentType);
   const [content, setContent] = useState([]);
   const [aiPrompt, setAiPrompt] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
@@ -41,7 +42,7 @@ const DocumentEditor = ({ _user, onNavigate }) => {
   const [streamingContent, setStreamingContent] = useState('');
   const [generationProgress, setGenerationProgress] = useState('');
   const [documentTitle, setDocumentTitle] = useState('Untitled Document');
-  const [showAiPanel, setShowAiPanel] = useState(false);
+  const [showAiPanel, setShowAiPanel] = useState(true);
   const [aiResponse, setAiResponse] = useState('');
   const [messages, setMessages] = useState([]);
   const [aiError, setAiError] = useState('');
@@ -58,9 +59,19 @@ const DocumentEditor = ({ _user, onNavigate }) => {
   // DOCX advanced state
   const [docxTables, setDocxTables] = useState([]);
   const [docxImages, setDocxImages] = useState([]);
+  const [docxCharts, setDocxCharts] = useState([]);
   const [showTableToolbar, setShowTableToolbar] = useState(false);
   const [activeTableIdx, setActiveTableIdx] = useState(-1);
   const [showInsertImage, setShowInsertImage] = useState(false);
+  const [showChartModal, setShowChartModal] = useState(false);
+  const [chartType, setChartType] = useState('bar');
+  const [chartTitle, setChartTitle] = useState('Chart Title');
+  const [chartData, setChartData] = useState([
+    { name: 'A', value: 40 },
+    { name: 'B', value: 30 },
+    { name: 'C', value: 20 },
+    { name: 'D', value: 50 }
+  ]);
   const [docxHeader, setDocxHeader] = useState('');
   const [docxFooter, setDocxFooter] = useState('');
   const [showPageNumbers, setShowPageNumbers] = useState(false);
@@ -77,15 +88,26 @@ const DocumentEditor = ({ _user, onNavigate }) => {
   const [showArtifacts, setShowArtifacts] = useState(false);
   const [selectedArtifact, setSelectedArtifact] = useState(null);
   const [autoRegenerate, setAutoRegenerate] = useState(false);
+  const [isPptGenerating, setIsPptGenerating] = useState(false);
+  const [pptGenerationStatus, setPptGenerationStatus] = useState('');
+  const [generatedPptFiles, setGeneratedPptFiles] = useState([]);
+  const [uploadedPptFile, setUploadedPptFile] = useState(null);
+  const [showPptResults, setShowPptResults] = useState(false);
+  const [pptTemplate, setPptTemplate] = useState('classic');
+  const [previewPptFile, setPreviewPptFile] = useState(null);
+  const [previewSlides, setPreviewSlides] = useState([]);
+  const [currentSlideIdx, setCurrentSlideIdx] = useState(0);
   const _editTimerRef = useRef(null);
   const pageRef = useRef(null);
   const aiPanelRef = useRef(null);
   const fileInputRef = useRef(null);
+  const pptUploadRef = useRef(null);
   // Refs to track latest state for artifact saving (avoids stale closure issues)
   const contentRef = useRef(content);
   const excelSheetsRef = useRef(excelSheets);
   const docxTablesRef = useRef(docxTables);
   const docxImagesRef = useRef(docxImages);
+  const docxChartsRef = useRef(docxCharts);
   const messagesRef = useRef(messages);
   const aiResponseRef = useRef(aiResponse);
   const aiPromptRef = useRef(aiPrompt);
@@ -95,6 +117,7 @@ const DocumentEditor = ({ _user, onNavigate }) => {
   useEffect(() => { excelSheetsRef.current = excelSheets; }, [excelSheets]);
   useEffect(() => { docxTablesRef.current = docxTables; }, [docxTables]);
   useEffect(() => { docxImagesRef.current = docxImages; }, [docxImages]);
+  useEffect(() => { docxChartsRef.current = docxCharts; }, [docxCharts]);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { aiResponseRef.current = aiResponse; }, [aiResponse]);
   useEffect(() => { aiPromptRef.current = aiPrompt; }, [aiPrompt]);
@@ -121,6 +144,28 @@ const DocumentEditor = ({ _user, onNavigate }) => {
     }, 10000);
     return () => clearTimeout(timer);
   }, [content, documentTitle, excelSheets]);
+
+  const docxTextRef = useRef('');
+
+  const syncDocxContent = useCallback(() => {
+    const text = docxTextRef.current || '';
+    // Split by double newlines to get paragraphs, then preserve single newlines within paragraphs
+    const paragraphBlocks = text.split('\n\n').filter(p => p.trim());
+    setContent(prev => {
+      const updated = paragraphBlocks.map((block, idx) => ({
+        id: prev[idx]?.id ?? Date.now() + idx,
+        type: 'paragraph',
+        text: block.trim()
+      }));
+      return updated.length > 0
+        ? updated
+        : [{ id: prev[0]?.id ?? Date.now(), type: 'paragraph', text: '' }];
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => clearTimeout(_editTimerRef.current);
+  }, []);
 
   const initializeContent = () => {
     switch (editorType) {
@@ -523,6 +568,104 @@ ATURAN UTAMA:
           setTimeout(() => { setGenerationProgress(''); setStreamingContent(''); }, 2000);
         } else {
           setAiError('No content generated.');
+          setIsStreaming(false);
+          setStreamingContent('');
+        }
+      } else {
+        setAiError('Invalid response.');
+        setIsStreaming(false);
+        setStreamingContent('');
+      }
+    } catch (error) {
+      setAiError(`Error: ${error.message}`);
+      setGenerationProgress('');
+      setIsStreaming(false);
+      setStreamingContent('');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleDocxAiFormat = async () => {
+    if (editorType !== 'docx' || !pageRef.current) return;
+    const rawText = pageRef.current.innerText.trim();
+    if (!rawText) {
+      setAiError('Tidak ada teks untuk diformat.');
+      return;
+    }
+
+    setIsGenerating(true);
+    setIsStreaming(true);
+    setStreamingContent('');
+    setAiError('');
+    setGenerationProgress('Memformat dokumen...');
+
+    try {
+      const systemContext = getSystemContext();
+      const formattedMessages = [
+        { sender: 'system', text: systemContext, timestamp: new Date().toISOString() },
+        ...messages.map(msg => ({ sender: msg.role === 'user' ? 'user' : 'assistant', text: msg.content || '', timestamp: new Date().toISOString() }))
+      ];
+
+      const prompt = `Format ulang teks dokumen akademik berikut menjadi makalah yang rapi dan terstruktur:\n\nATURAN FORMATTING TEKS:\n1. Setiap paragraf HARUS dipisahkan dengan DUA newline (\\n\\n)\n2. Gunakan heading/BAB dengan format: BAB I: JUDUL\\n\\nThen content\\n\\n\n3. Setiap bagian/section diberi nomor (BAB I, BAB II, dll)\n4. Jangan gunakan markdown, asterisk, atau simbol apapun\n5. Gunakan struktur: BAB -> Judul -> Isi paragraf (dengan newline ganda antar paragraf)\n6. Pastikan setiap paragraf berkualitas akademik tinggi\n\nATURAN FORMATTING TABEL (JIKA ADA DATA TABEL):\n- Jika terdapat data tabular, buat tabel dengan format EXACTLY:\n[TABLE]\nHeader1 | Header2 | Header3\nValue1 | Value2 | Value3\nValue1 | Value2 | Value3\n[/TABLE]\n- Gunakan pipe (|) untuk separator kolom\n- Baris pertama adalah header (direkomendasikan)\n- Satu baris per data\n- Tabel akan di-insert otomatis ke dokumen\n\nKAPABILITAS EDITOR:\n- [TABLE]...[/TABLE]: Untuk tabel data\n- Jika ada grafik/chart perlu, sebutkan dalam teks\n\nOUTPUT:\n- Hanya teks terformat, tabel dengan [TABLE] marker, tanpa penjelasan tambahan\n\nTeks untuk diformat:\n${rawText}`;
+      const response = await sendMessageToGrok(prompt, formattedMessages);
+
+      if (response?.body) {
+        let fullContent = '';
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const jsonStr = line.slice(6);
+                  if (jsonStr === '[DONE]') continue;
+                  const json = JSON.parse(jsonStr);
+                  if (json.choices?.[0]?.delta?.content) {
+                    fullContent += json.choices[0].delta.content;
+                    setStreamingContent(prev => prev + json.choices[0].delta.content);
+                  }
+                } catch (_e) {
+                  // skip parse error
+                }
+              }
+            }
+          }
+        } finally {
+          reader.releaseLock();
+        }
+
+        if (fullContent.trim()) {
+          const cleaned = cleanAiResponse(fullContent);
+          
+          // Parse and extract tables from AI response
+          const parsedTables = parseTablesFromText(cleaned);
+          if (parsedTables.length > 0) {
+            insertParsedTables(parsedTables);
+          }
+          
+          // Remove table markers from text for display
+          const textWithoutTables = removeTableMarkersFromText(cleaned);
+          
+          pageRef.current.innerText = textWithoutTables;
+          docxTextRef.current = textWithoutTables;
+          syncDocxContent();
+          setGenerationProgress('Selesai');
+          setIsStreaming(false);
+          const newMessages = [...messages, { role: 'user', content: prompt }, { role: 'assistant', content: cleaned }];
+          setMessages(newMessages);
+          messagesRef.current = newMessages;
+          setAiResponse(cleaned);
+          aiResponseRef.current = cleaned;
+          setTimeout(() => { setGenerationProgress(''); setStreamingContent(''); }, 2000);
+        } else {
+          setAiError('Tidak ada hasil format.');
           setIsStreaming(false);
           setStreamingContent('');
         }
@@ -953,6 +1096,84 @@ ATURAN UTAMA:
     if (docxTables.length <= 1) setShowTableToolbar(false);
   };
 
+  // ===== DOCX CHART OPERATIONS =====
+  const insertChart = () => {
+    const newChart = {
+      id: Date.now(),
+      type: chartType,
+      title: chartTitle,
+      data: chartData.map(d => ({ ...d }))
+    };
+    setDocxCharts(prev => [...prev, newChart]);
+    setShowChartModal(false);
+    setChartTitle('Chart Title');
+    setChartData([
+      { name: 'A', value: 40 },
+      { name: 'B', value: 30 },
+      { name: 'C', value: 20 },
+      { name: 'D', value: 50 }
+    ]);
+  };
+
+  const updateChartData = (text) => {
+    try {
+      const lines = text.trim().split('\n');
+      const parsed = lines.map(line => {
+        const [name, value] = line.split(':').map(s => s.trim());
+        return { name, value: parseInt(value) || 0 };
+      }).filter(d => d.name && d.value);
+      if (parsed.length > 0) setChartData(parsed);
+    } catch (_e) {
+      console.warn('Chart data parse error');
+    }
+  };
+
+  const deleteChart = (chartIdx) => {
+    setDocxCharts(prev => prev.filter((_, i) => i !== chartIdx));
+  };
+
+  const renderChart = (chart) => {
+    const chartColors = ['#4472c4', '#70ad47', '#ed7d31', '#ffc000', '#5b9bd5'];
+    if (chart.type === 'bar') {
+      return (
+        <ResponsiveContainer width="100%" height={250}>
+          <BarChart data={chart.data}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="name" />
+            <YAxis />
+            <Tooltip />
+            <Bar dataKey="value" fill="#4472c4" />
+          </BarChart>
+        </ResponsiveContainer>
+      );
+    } else if (chart.type === 'line') {
+      return (
+        <ResponsiveContainer width="100%" height={250}>
+          <LineChart data={chart.data}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="name" />
+            <YAxis />
+            <Tooltip />
+            <Line type="monotone" dataKey="value" stroke="#4472c4" />
+          </LineChart>
+        </ResponsiveContainer>
+      );
+    } else if (chart.type === 'pie') {
+      return (
+        <ResponsiveContainer width="100%" height={250}>
+          <PieChart>
+            <Pie dataKey="value" data={chart.data} cx="50%" cy="50%" labelLine={false} label>
+              {chart.data.map((_, idx) => (
+                <Cell key={idx} fill={chartColors[idx % chartColors.length]} />
+              ))}
+            </Pie>
+            <Tooltip />
+          </PieChart>
+        </ResponsiveContainer>
+      );
+    }
+  };
+
   // ===== DOCX IMAGE =====
   const handleImageUpload = (e) => {
     const file = e.target.files?.[0];
@@ -968,49 +1189,21 @@ ATURAN UTAMA:
     reader.readAsDataURL(file);
   };
 
-  const renderDocxEditor = () => {
-    // Render paragraphs as <p> and preserve internal newlines with <br/> so AI line breaks show
-    const pageContentNodes = Array.isArray(content) && content.length > 0
-      ? content.map(item => {
-        if (item.type === 'paragraph') {
-          const parts = (item.text || '').split('\n');
-          return (
-            <p key={item.id}>
-              {parts.map((line, i) => (
-                <React.Fragment key={i}>
-                  {line}
-                  {i < parts.length - 1 ? <br /> : null}
-                </React.Fragment>
-              ))}
-            </p>
-          );
-        }
-        if (item.type === 'list') {
-          if (item.ordered) {
-            return (
-              <ol key={item.id}>
-                {item.items.map((it, i) => (
-                  <li key={i}>{it.split('\n').map((ln, idx) => (
-                    <React.Fragment key={idx}>{ln}{idx < ln.split('\n').length - 1 ? <br/> : null}</React.Fragment>
-                  ))}</li>
-                ))}
-              </ol>
-            );
-          }
-          return (
-            <ul key={item.id}>
-              {item.items.map((it, i) => (
-                <li key={i}>{it.split('\n').map((ln, idx) => (
-                  <React.Fragment key={idx}>{ln}{idx < ln.split('\n').length - 1 ? <br/> : null}</React.Fragment>
-                ))}</li>
-              ))}
-            </ul>
-          );
-        }
-        if (item.type === 'table_row') return null; // tables rendered elsewhere
-        return null;
-      }) : null;
+  const getDocxPlainText = () => {
+    if (!Array.isArray(content) || content.length === 0) return '';
+    return content
+      .filter(item => item.type === 'paragraph')
+      .map(item => item.text || '')
+      .join('\n\n');
+  };
 
+  useEffect(() => {
+    if (editorType === 'docx' && pageRef.current) {
+      pageRef.current.innerText = getDocxPlainText();
+    }
+  }, [editorType, content]);
+
+  const renderDocxEditor = () => {
     return (
       <div className="docx-editor-wrapper">
         <div className="toolbar-header">
@@ -1019,12 +1212,13 @@ ATURAN UTAMA:
           </button>
           <span className="toolbar-label-text">Format</span>
           <div className="toolbar-header-actions">
+            <button className="toolbar-toggle" onClick={handleDocxAiFormat} title="Rapikan dokumen dengan AI">✍️</button>
             <button className="toolbar-toggle" onClick={() => setShowTableToolbar(!showTableToolbar)} title="Table">⊞</button>
+            <button className="toolbar-toggle" onClick={() => setShowChartModal(true)} title="Chart">📊</button>
             <button className="toolbar-toggle" onClick={() => setShowInsertImage(true)} title="Image">🖼</button>
             <button className="toolbar-toggle" onClick={() => setShowPageNumbers(!showPageNumbers)} title="Page #">#</button>
           </div>
         </div>
-
         {showToolbar && (
           <div className="word-toolbar">
             <div className="toolbar-row">
@@ -1112,6 +1306,42 @@ ATURAN UTAMA:
           </div>
         )}
 
+        {/* Chart Modal */}
+        {showChartModal && (
+          <div className="image-upload-overlay" onClick={() => setShowChartModal(false)}>
+            <div className="image-upload-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '500px' }}>
+              <h4>Buat Grafik 📊</h4>
+              <div style={{ marginBottom: '12px' }}>
+                <label>Jenis Grafik:</label>
+                <select value={chartType} onChange={e => setChartType(e.target.value)} style={{ width: '100%', padding: '6px', marginTop: '4px' }}>
+                  <option value="bar">Bar Chart</option>
+                  <option value="line">Line Chart</option>
+                  <option value="pie">Pie Chart</option>
+                </select>
+              </div>
+              <div style={{ marginBottom: '12px' }}>
+                <label>Judul Grafik:</label>
+                <input type="text" value={chartTitle} onChange={e => setChartTitle(e.target.value)} style={{ width: '100%', padding: '6px', marginTop: '4px', boxSizing: 'border-box' }} />
+              </div>
+              <div style={{ marginBottom: '12px' }}>
+                <label>Data (format: Nama:Nilai, satu per baris):</label>
+                <textarea 
+                  style={{ width: '100%', height: '100px', padding: '6px', marginTop: '4px', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '12px' }}
+                  defaultValue="A:40\nB:30\nC:20\nD:50"
+                  onChange={e => updateChartData(e.target.value)}
+                />
+              </div>
+              <div style={{ marginBottom: '12px', padding: '12px', border: '1px solid #ddd', borderRadius: '6px', backgroundColor: '#f9f9f9', height: '250px', overflow: 'hidden' }}>
+                {renderChart({ type: chartType, title: chartTitle, data: chartData })}
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button className="toolbar-btn" onClick={insertChart} style={{ flex: 1 }}>✓ Insert</button>
+                <button className="toolbar-btn" onClick={() => setShowChartModal(false)} style={{ flex: 1 }}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="docx-editor">
           <div className="a4-container">
             {/* Header */}
@@ -1138,16 +1368,12 @@ ATURAN UTAMA:
                 padding: '2.54cm',
               }}
               onInput={e => {
-                const text = e.currentTarget.innerText;
-                const lines = text.split('\n').filter(l => l.trim() !== '');
-                setContent(lines.length === 0
-                  ? [{ id: Date.now(), type: 'paragraph', text: '' }]
-                  : lines.map((line, idx) => ({ id: Date.now() + idx, type: 'paragraph', text: line }))
-                );
+                docxTextRef.current = e.currentTarget.innerText;
               }}
-            >
-              {pageContentNodes}
-            </div>
+              onBlur={() => {
+                syncDocxContent();
+              }}
+            />
 
             {/* Tables */}
             {docxTables.map((table, tIdx) => (
@@ -1191,6 +1417,25 @@ ATURAN UTAMA:
               <div key={img.id} className="a4-page" style={{ marginTop: 12, padding: '12px 28px', textAlign: 'center' }}>
                 <img src={img.src} alt={img.alt} style={{ maxWidth: '100%', height: 'auto', borderRadius: 4 }} />
                 <p style={{ fontSize: 11, color: '#666', marginTop: 4 }}>{img.alt}</p>
+              </div>
+            ))}
+
+            {/* Charts */}
+            {docxCharts.map((chart, cIdx) => (
+              <div key={chart.id} className="a4-page" style={{ marginTop: 12, padding: '12px 28px' }}>
+                <div style={{ border: '1px solid #ddd', borderRadius: '4px', padding: '12px', position: 'relative', backgroundColor: '#fafafa' }}>
+                  <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: 'bold' }}>{chart.title}</h4>
+                  <div style={{ height: '280px' }}>
+                    {renderChart(chart)}
+                  </div>
+                  <button 
+                    className="toolbar-btn" 
+                    onClick={() => deleteChart(cIdx)}
+                    style={{ position: 'absolute', top: '8px', right: '8px', padding: '4px 8px', fontSize: '12px' }}
+                  >
+                    ✕
+                  </button>
+                </div>
               </div>
             ))}
 
@@ -1378,7 +1623,7 @@ ATURAN UTAMA:
   const handleExport = async () => {
     try {
       if (editorType === 'docx') await exportDocx();
-      else if (editorType === 'pptx') await exportPptx();
+      else if (editorType === 'pptx') await generatePptxViaServer();
       else if (editorType === 'excel') await exportExcel();
     } catch (error) {
       alert('Export error: ' + error.message);
@@ -1411,11 +1656,60 @@ ATURAN UTAMA:
     URL.revokeObjectURL(el.href);
   };
 
+  // ===== PARSE TABLES FROM AI RESPONSE =====
+  const parseTablesFromText = (text) => {
+    const tableRegex = /\[TABLE\]([\s\S]*?)\[\/TABLE\]/g;
+    const matches = [];
+    let match;
+    while ((match = tableRegex.exec(text)) !== null) {
+      matches.push(match[1]);
+    }
+    
+    return matches.map(tableStr => {
+      const lines = tableStr.trim().split('\n').filter(line => line.trim());
+      if (lines.length === 0) return null;
+      
+      const rows = lines.map(line => {
+        const cells = line.split('|').map(cell => cell.trim()).filter(c => c);
+        return {
+          id: Date.now() + Math.random(),
+          cells: cells.map((text, ci) => ({
+            id: Date.now() + ci,
+            text: text,
+            rowspan: 1,
+            colspan: 1,
+            bold: false,
+            italic: false,
+            align: 'left',
+            bgColor: ''
+          }))
+        };
+      });
+      
+      if (rows.length === 0) return null;
+      
+      return {
+        id: Date.now(),
+        rows: rows
+      };
+    }).filter(t => t !== null);
+  };
+
+  const insertParsedTables = (tables) => {
+    if (!Array.isArray(tables) || tables.length === 0) return;
+    setDocxTables(prev => [...prev, ...tables]);
+  };
+
+  const removeTableMarkersFromText = (text) => {
+    return text.replace(/\[TABLE\]([\s\S]*?)\[\/TABLE\]/g, '').trim();
+  };
+
   // ===== EXPORT DOCX - International Standard Format =====
   const exportDocx = async () => {
-    const paragraphs = [];
+    const sections = [];
+    
+    // Export paragraphs
     if (Array.isArray(content)) {
-      // Build docx paragraphs from content entries (paragraph, list, table_row)
       content.forEach(item => {
         if (item.type === 'paragraph' && item.text) {
           const blocks = item.text.replace(/\r\n/g, '\n').split(/\n{2,}/g);
@@ -1423,7 +1717,7 @@ ATURAN UTAMA:
             const lines = block.split('\n');
             lines.forEach((line, li) => {
               const isLastLineInBlock = li === lines.length - 1;
-              paragraphs.push(
+              sections.push(
                 new Paragraph({
                   children: [new TextRun({ text: (line || ' '), font: 'Times New Roman', size: 24 })],
                   spacing: { line: 360, lineRule: 'auto', after: isLastLineInBlock ? 240 : 0, before: 0 },
@@ -1434,10 +1728,9 @@ ATURAN UTAMA:
             });
           });
         } else if (item.type === 'list' && Array.isArray(item.items)) {
-          // Render each list item as a paragraph with hanging indent and bullet/number prefix
           item.items.forEach((it, idx) => {
             const prefix = item.ordered ? `${idx + 1}. ` : '• ';
-            paragraphs.push(
+            sections.push(
               new Paragraph({
                 children: [new TextRun({ text: prefix + (it || ' '), font: 'Times New Roman', size: 24 })],
                 spacing: { line: 360, lineRule: 'auto', after: 120, before: 0 },
@@ -1446,26 +1739,52 @@ ATURAN UTAMA:
               })
             );
           });
-        } else if (item.type === 'table_row' && Array.isArray(item.cells)) {
-          // Fallback: join cells with tabs so they appear separated in Word
-          const rowText = item.cells.join('\t');
-          paragraphs.push(
-            new Paragraph({
-              children: [new TextRun({ text: rowText, font: 'Times New Roman', size: 24 })],
-              spacing: { line: 360, lineRule: 'auto', after: 120, before: 0 },
-              alignment: AlignmentType.LEFT,
-            })
-          );
         }
       });
     }
-    if (!paragraphs.length) paragraphs.push(new Paragraph({ text: '' }));
+    
+    // Export docxTables
+    if (Array.isArray(docxTablesRef.current) && docxTablesRef.current.length > 0) {
+      docxTablesRef.current.forEach((table) => {
+        const rows = table.rows.map(row => 
+          new TableRow({
+            children: row.cells.map(cell => 
+              new TableCell({
+                children: [new Paragraph({ 
+                  children: [new TextRun({
+                    text: cell.text || '',
+                    bold: cell.bold,
+                    italic: cell.italic,
+                    font: 'Times New Roman',
+                    size: 22
+                  })],
+                })],
+                verticalAlign: VerticalAlign.CENTER,
+                shading: cell.bgColor ? { fill: cell.bgColor.replace('#', ''), color: 'auto' } : undefined,
+              })
+            )
+          })
+        );
+        
+        sections.push(
+          new Table({
+            rows: rows,
+            width: { size: 100, type: 'pct' },
+          })
+        );
+        
+        // Add spacing after table
+        sections.push(new Paragraph({ text: '' }));
+      });
+    }
+    
+    if (sections.length === 0) sections.push(new Paragraph({ text: '' }));
     const doc = new Document({
       sections: [{
         properties: {
           page: {
             margins: {
-              top: 1440,    // 1 inch = 1440 twips
+              top: 1440,
               right: 1440,
               bottom: 1440,
               left: 1440,
@@ -1474,12 +1793,12 @@ ATURAN UTAMA:
               gutter: 0,
             },
             size: {
-              width: 12240,  // 8.5 inches = letter size
-              height: 15840, // 11 inches
+              width: 12240,
+              height: 15840,
             },
           }
         },
-        children: paragraphs
+        children: sections
       }]
     });
     const blob = await Packer.toBlob(doc);
@@ -1512,6 +1831,197 @@ ATURAN UTAMA:
       new Blob([XLSX.write(wb, { bookType: 'xlsx', type: 'array' })], { type: 'application/octet-stream' }),
       `${documentTitle || 'spreadsheet'}.xlsx`
     );
+  };
+
+  // ===== PPT GENERATION VIA SERVER (with security) =====
+  const generatePptxViaServer = async () => {
+    try {
+      if (!Array.isArray(content) || content.length === 0) {
+        alert('Tambahkan slide sebelum generate');
+        return;
+      }
+
+      setIsPptGenerating(true);
+      setPptGenerationStatus('Mempersiapkan data...');
+
+      // Extract slides data for server
+      const slides = content
+        .filter(slide => slide.type === 'slide')
+        .map(slide => ({
+          title: slide.title || 'Slide',
+          content: slide.content || ''
+        }));
+
+      if (slides.length === 0) {
+        alert('Minimal 1 slide dengan konten');
+        setIsPptGenerating(false);
+        return;
+      }
+
+      setPptGenerationStatus(`Mengirim ${slides.length} slide ke server...`);
+
+      const requestPayload = {
+        title: documentTitle || 'Untitled Presentation',
+        subtitle: 'Dibuat oleh Deepernova',
+        template: pptTemplate,
+        slides: slides
+      };
+
+      console.log('[PPT_EDITOR] Sending to /api/generate-ppt:', {
+        title: requestPayload.title,
+        slide_count: slides.length,
+        bytes: JSON.stringify(requestPayload).length
+      });
+
+      const response = await fetch('/api/generate-ppt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestPayload)
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        const errorMsg = result.error || result.data?.error || 'Gagal generate PPT';
+        setPptGenerationStatus(`❌ Error: ${errorMsg}`);
+        alert(`Error: ${errorMsg}`);
+        setIsPptGenerating(false);
+        return;
+      }
+
+      setPptGenerationStatus(`✅ Berhasil! Mengunduh ${result.slides_count} slides...`);
+
+      // Track generated file
+      setGeneratedPptFiles(prev => [...prev, {
+        filename: result.filename,
+        url: result.downloadUrl,
+        slides: result.slides_count,
+        size: result.size_mb,
+        timestamp: new Date().toLocaleString()
+      }]);
+      
+      setShowPptResults(true);
+
+      // Download file from server
+      const downloadUrl = result.downloadUrl;
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = result.filename || `${documentTitle || 'presentation'}.pptx`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      console.log('[PPT_EDITOR] ✅ Download complete:', result.filename);
+      
+      setTimeout(() => {
+        setPptGenerationStatus('');
+        setIsPptGenerating(false);
+      }, 2000);
+
+    } catch (error) {
+      console.error('[PPT_EDITOR] Error:', error);
+      const errMsg = error.message || 'Kesalahan saat generate';
+      setPptGenerationStatus(`❌ ${errMsg}`);
+      alert(`Error: ${errMsg}`);
+      setIsPptGenerating(false);
+    }
+  };
+
+  // ===== PPT FILE UPLOAD =====
+  const handlePptUpload = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    
+    if (!file.name.endsWith('.pptx')) {
+      alert('Hanya file .pptx yang didukung');
+      return;
+    }
+    
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      setUploadedPptFile({
+        name: file.name,
+        size: (file.size / 1024 / 1024).toFixed(2),
+        type: 'uploaded',
+        timestamp: new Date().toLocaleString(),
+        data: e.target?.result
+      });
+      setShowPptResults(true);
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  // ===== PPT SLIDE PREVIEW =====
+  const extractSlidesFromPptx = async (pptxData) => {
+    try {
+      const JSZip = (await import('jszip')).default;
+      const zip = new JSZip();
+      await zip.loadAsync(pptxData);
+
+      // Get slide content
+      const slides = [];
+      let slideNum = 1;
+      
+      while (true) {
+        const slidePath = `ppt/slides/slide${slideNum}.xml`;
+        const slideFile = zip.file(slidePath);
+        if (!slideFile) break;
+
+        const slideXml = await slideFile.async('text');
+        const parser = new DOMParser();
+        const slideDoc = parser.parseFromString(slideXml, 'text/xml');
+
+        const paragraphs = Array.from(slideDoc.querySelectorAll('a\\:p'))
+          .map(p => Array.from(p.querySelectorAll('a\\:t, t'))
+            .map(el => el.textContent?.trim())
+            .filter(Boolean)
+            .join(' ')
+          )
+          .filter(Boolean);
+
+        const title = paragraphs.length > 0 ? paragraphs[0] : `Slide ${slideNum}`;
+        const body = paragraphs.slice(1).map(line => line.replace(/^[-•]\s*/, '').trim());
+        const lines = body.length > 0 ? body : paragraphs.length > 1 ? paragraphs.slice(1) : [];
+        const content = [title, ...lines].join('\n');
+
+        slides.push({
+          number: slideNum,
+          title,
+          lines,
+          content,
+        });
+
+        slideNum += 1;
+      }
+
+      return slides.length > 0 ? slides : [{ number: 1, content: 'Empty presentation' }];
+    } catch (error) {
+      console.error('Error parsing PPTX:', error);
+      return [{ number: 1, content: 'Gagal parse file' }];
+    }
+  };
+
+  const handlePptPreview = async (file) => {
+    if (file.type === 'uploaded' && file.data) {
+      // Preview uploaded file
+      const slides = await extractSlidesFromPptx(file.data);
+      setPreviewSlides(slides);
+      setPreviewPptFile(file);
+      setCurrentSlideIdx(0);
+    } else if (file.url) {
+      // Preview generated file - fetch from server
+      try {
+        const response = await fetch(file.url);
+        const arrayBuffer = await response.arrayBuffer();
+        const slides = await extractSlidesFromPptx(arrayBuffer);
+        setPreviewSlides(slides);
+        setPreviewPptFile(file);
+        setCurrentSlideIdx(0);
+      } catch (error) {
+        console.error('Error fetching PPT:', error);
+        alert('Gagal load preview');
+      }
+    }
   };
 
   // ===== FORMATTING =====
@@ -1551,15 +2061,196 @@ ATURAN UTAMA:
             <button className={`type-btn ${editorType === 'pptx' ? 'active' : ''}`} onClick={() => setEditorType('pptx')}>PPTX</button>
             <button className={`type-btn ${editorType === 'excel' ? 'active' : ''}`} onClick={() => setEditorType('excel')}>XLSX</button>
           </div>
+          {pptGenerationStatus && (
+            <span className={`ppt-status ${isPptGenerating ? 'generating' : 'complete'}`}>
+              {isPptGenerating ? '⏳ ' : ''}{pptGenerationStatus}
+            </span>
+          )}
+          {editorType === 'pptx' && (
+            <>
+              <button className="artifact-btn" onClick={() => setShowPptResults(!showPptResults)} title="PPT Results">
+                📊 {generatedPptFiles.length + (uploadedPptFile ? 1 : 0)}
+              </button>
+              <input 
+                ref={pptUploadRef} 
+                type="file" 
+                accept=".pptx" 
+                style={{ display: 'none' }} 
+                onChange={handlePptUpload}
+              />
+              <button className="artifact-btn" onClick={() => pptUploadRef.current?.click()} title="Upload PPT">
+                📂
+              </button>
+            </>
+          )}
           <button className="artifact-btn" onClick={() => setShowArtifacts(!showArtifacts)} title="Artifacts">
             {showArtifacts ? '✕' : '+'}
           </button>
-          <button className="ai-header-btn" onClick={() => setShowAiPanel(!showAiPanel)} title="AI">🤖</button>
-          <button className="export-btn" onClick={handleExport} title="Export">⬇</button>
+          <button className="export-btn" onClick={handleExport} disabled={isPptGenerating} title="Export">
+            {isPptGenerating ? '⏳' : '⬇'}
+          </button>
         </div>
       </div>
 
       <div className="editor-layout">
+        {editorType === 'pptx' ? (
+          <div className="pptx-layout">
+            <div className="pptx-editor-section">
+              <div className="ppt-template-bar">
+                <span className="ppt-template-label">Template:</span>
+                <div className="ppt-template-selector">
+                  {['classic', 'modern', 'bold', 'minimal'].map(option => (
+                    <button
+                      key={option}
+                      className={`ppt-template-btn ${pptTemplate === option ? 'active' : ''}`}
+                      onClick={() => setPptTemplate(option)}
+                      type="button"
+                    >
+                      {option === 'classic' ? 'Classic' : option === 'modern' ? 'Modern' : option === 'bold' ? 'Bold' : 'Minimal'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {renderEditor()}
+            </div>
+            <div className="pptx-chat-section">
+              {showAiPanel && (
+                <div className="ai-panel" ref={aiPanelRef}>
+                  <div className="ai-header">
+                    <span className="ai-title">💬 Chat</span>
+                    <button className="close-btn" onClick={() => setShowAiPanel(false)}>✕</button>
+                  </div>
+                  <div className="ai-content">
+                    {generationProgress && <div className="generation-status">{generationProgress}</div>}
+                    {aiError && <div className="error-message">{aiError}</div>}
+
+                    <div className="ai-input-section">
+                      <div className="textarea-wrapper">
+                        <textarea
+                          value={aiPrompt}
+                          onChange={e => {
+                            setAiPrompt(e.target.value);
+                            const ta = e.target;
+                            ta.style.height = 'auto';
+                            ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+                          }}
+                          placeholder={messages.length === 0 ? "Chat with Orion..." : "Reply to Orion..."}
+                          disabled={isGenerating}
+                          className="message-input"
+                          rows={1}
+                        />
+                      </div>
+                      <button
+                        className={`action-button ${isGenerating ? 'stop-mode' : 'send-mode'}`}
+                        onClick={isGenerating ? handleStopStreaming : handleAiWrite}
+                        disabled={!isGenerating && !aiPrompt.trim()}
+                      >
+                        {isGenerating ? 'Stop' : 'Send'}
+                      </button>
+                    </div>
+
+                    {isStreaming && streamingContent && (
+                      <div className="ai-response-compact streaming">
+                        <div className="response-label">
+                          <span>Streaming</span>
+                          <span className="streaming-dot">●</span>
+                        </div>
+                        <div className="ai-response-content">
+                          {streamingContent.split('\n').slice(0, 10).map((line, idx) => (
+                            <p key={idx} className="response-line">{line || '\u00A0'}</p>
+                          ))}
+                          {streamingContent.split('\n').length > 10 && <p className="response-more">...</p>}
+                          <p className="streaming-cursor">▌</p>
+                        </div>
+                      </div>
+                    )}
+
+                    {!isStreaming && aiResponse && (
+                      <div className="ai-response-compact">
+                        <div className="response-label">Preview</div>
+                        <div className="ai-response-content">
+                          {aiResponse.split('\n').slice(0, 8).map((line, idx) => (
+                            <p key={idx} className="response-line">{line}</p>
+                          ))}
+                          {aiResponse.split('\n').length > 8 && <p className="response-more">...</p>}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            {previewPptFile && previewSlides.length > 0 && (
+              <div className="pptx-preview-section">
+                <div className="ppt-preview-inline">
+                  <div className="ppt-preview-header">
+                    <div className="ppt-preview-title">
+                      <span>{previewPptFile.name || previewPptFile.filename}</span>
+                      <span className="ppt-slide-counter">
+                        {currentSlideIdx + 1} / {previewSlides.length}
+                      </span>
+                    </div>
+                    <button className="ppt-preview-close" onClick={() => { setPreviewPptFile(null); setPreviewSlides([]); }}>✕</button>
+                  </div>
+                  <div className="ppt-preview-content">
+                    <div className="ppt-slide-display">
+                      <div className="ppt-slide-number">
+                        SLIDE {previewSlides[currentSlideIdx]?.number}
+                      </div>
+                      <div className="ppt-slide-content-card">
+                        <div className="ppt-slide-title">
+                          {previewSlides[currentSlideIdx]?.title}
+                        </div>
+                        {previewSlides[currentSlideIdx]?.lines?.length > 0 ? (
+                          <ul className="ppt-slide-bullets">
+                            {previewSlides[currentSlideIdx].lines.map((line, idx) => (
+                              <li key={idx}>{line}</li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <div className="ppt-slide-text">
+                            {previewSlides[currentSlideIdx]?.content}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="ppt-preview-controls">
+                    <button 
+                      className="ppt-nav-btn" 
+                      onClick={() => setCurrentSlideIdx(Math.max(0, currentSlideIdx - 1))}
+                      disabled={currentSlideIdx === 0}
+                    >
+                      ← Sebelumnya
+                    </button>
+                    
+                    <div className="ppt-slide-dots">
+                      {previewSlides.map((_, idx) => (
+                        <button
+                          key={idx}
+                          className={`ppt-dot ${idx === currentSlideIdx ? 'active' : ''}`}
+                          onClick={() => setCurrentSlideIdx(idx)}
+                        >
+                          {idx + 1}
+                        </button>
+                      ))}
+                    </div>
+
+                    <button 
+                      className="ppt-nav-btn" 
+                      onClick={() => setCurrentSlideIdx(Math.min(previewSlides.length - 1, currentSlideIdx + 1))}
+                      disabled={currentSlideIdx === previewSlides.length - 1}
+                    >
+                      Selanjutnya →
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
         <div className="editor-center">
           <div className="editor-main">
             {renderEditor()}
@@ -1677,6 +2368,130 @@ ATURAN UTAMA:
               )}
             </div>
           </div>
+        )}
+
+        {/* PPT Results Panel */}
+        {editorType === 'pptx' && (
+          <div className="ppt-results-panel">
+            <div className="ppt-results-header">
+              <span className="ppt-results-title">📊 PPT Files ({generatedPptFiles.length + (uploadedPptFile ? 1 : 0)})</span>
+              <button className="close-btn" onClick={() => setShowPptResults(false)}>✕</button>
+            </div>
+            <div className="ppt-results-list">
+              {/* Generated Files */}
+              {generatedPptFiles.map((file, idx) => (
+                <div key={`gen-${idx}`} className="ppt-file-item">
+                  <div className="ppt-file-icon">📄</div>
+                  <div className="ppt-file-info">
+                    <div className="ppt-file-name">{file.filename}</div>
+                    <div className="ppt-file-meta">
+                      <span>📊 {file.slides} slides</span>
+                      <span>💾 {file.size}MB</span>
+                      <span>🕐 {file.timestamp}</span>
+                    </div>
+                  </div>
+                  <div className="ppt-file-actions">
+                    <a href={file.url} download={file.filename} className="ppt-download-btn" title="Download">⬇</a>
+                    <button className="ppt-view-btn" onClick={() => handlePptPreview(file)} title="View">👁</button>
+                  </div>
+                </div>
+              ))}
+              
+              {/* Uploaded File */}
+              {uploadedPptFile && (
+                <div className="ppt-file-item uploaded">
+                  <div className="ppt-file-icon">📤</div>
+                  <div className="ppt-file-info">
+                    <div className="ppt-file-name">{uploadedPptFile.name}</div>
+                    <div className="ppt-file-meta">
+                      <span>📌 Uploaded</span>
+                      <span>💾 {uploadedPptFile.size}MB</span>
+                      <span>🕐 {uploadedPptFile.timestamp}</span>
+                    </div>
+                  </div>
+                  <div className="ppt-file-actions">
+                    <button className="ppt-view-btn" onClick={() => handlePptPreview(uploadedPptFile)} title="View">👁</button>
+                  </div>
+                </div>
+              )}
+
+              {generatedPptFiles.length === 0 && !uploadedPptFile && (
+                <div className="ppt-empty-state">
+                  <p>Belum ada file PPT</p>
+                  <p className="ppt-empty-hint">Generate atau upload file PPT untuk melihatnya di sini</p>
+                </div>
+              )}
+            </div>
+
+            {previewPptFile && previewSlides.length > 0 && (
+              <div className="ppt-preview-inline">
+                <div className="ppt-preview-header">
+                  <div className="ppt-preview-title">
+                    <span>{previewPptFile.name || previewPptFile.filename}</span>
+                    <span className="ppt-slide-counter">
+                      {currentSlideIdx + 1} / {previewSlides.length}
+                    </span>
+                  </div>
+                  <button className="ppt-preview-close" onClick={() => { setPreviewPptFile(null); setPreviewSlides([]); }}>✕</button>
+                </div>
+                <div className="ppt-preview-content">
+                  <div className="ppt-slide-display">
+                    <div className="ppt-slide-number">
+                      SLIDE {previewSlides[currentSlideIdx]?.number}
+                    </div>
+                    <div className="ppt-slide-content-card">
+                      <div className="ppt-slide-title">
+                        {previewSlides[currentSlideIdx]?.title}
+                      </div>
+                      {previewSlides[currentSlideIdx]?.lines?.length > 0 ? (
+                        <ul className="ppt-slide-bullets">
+                          {previewSlides[currentSlideIdx].lines.map((line, idx) => (
+                            <li key={idx}>{line}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="ppt-slide-text">
+                          {previewSlides[currentSlideIdx]?.content}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="ppt-preview-controls">
+                  <button 
+                    className="ppt-nav-btn" 
+                    onClick={() => setCurrentSlideIdx(Math.max(0, currentSlideIdx - 1))}
+                    disabled={currentSlideIdx === 0}
+                  >
+                    ← Sebelumnya
+                  </button>
+                  
+                  <div className="ppt-slide-dots">
+                    {previewSlides.map((_, idx) => (
+                      <button
+                        key={idx}
+                        className={`ppt-dot ${idx === currentSlideIdx ? 'active' : ''}`}
+                        onClick={() => setCurrentSlideIdx(idx)}
+                      >
+                        {idx + 1}
+                      </button>
+                    ))}
+                  </div>
+
+                  <button 
+                    className="ppt-nav-btn" 
+                    onClick={() => setCurrentSlideIdx(Math.min(previewSlides.length - 1, currentSlideIdx + 1))}
+                    disabled={currentSlideIdx === previewSlides.length - 1}
+                  >
+                    Selanjutnya →
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+          </>
         )}
       </div>
     </div>

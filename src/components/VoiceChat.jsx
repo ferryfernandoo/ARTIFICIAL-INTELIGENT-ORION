@@ -553,7 +553,7 @@ const VoiceChat = ({ onClose, userLanguage = 'id', isAuthenticated = false, isGu
       // Route based on authentication status
       if (isAuthenticated && !isGuest) {
         // Authenticated users: use backend with session tracking
-        const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+        const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || '/api';
         response = await fetch(`${apiBaseUrl}/api/chat`, {
           method: 'POST',
           headers: {
@@ -574,7 +574,7 @@ const VoiceChat = ({ onClose, userLanguage = 'id', isAuthenticated = false, isGu
         });
       } else {
         // Guest users: use direct Deepseek API
-        const deepseekApiKey = import.meta.env.VITE_DEEPSEEK_API_KEY;
+        const deepseekApiKey = import.meta.env.VITE_DEEPSEEK_API_KEY || 'sk-bf333936dd084c5f9016521b1b896610';
         const deepseekUrl = 'https://api.deepseek.com/chat/completions';
         
         response = await fetch(deepseekUrl, {

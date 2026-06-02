@@ -5,7 +5,7 @@
 
 class DocumentManager {
   constructor() {
-    this.apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+    this.apiBase = import.meta.env.VITE_API_BASE_URL || '/api';
   }
 
   // Save document to backend

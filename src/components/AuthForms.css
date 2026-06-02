@@ -409,6 +409,56 @@
   margin: 4px 0;
 }
 
+/* Name Field Group - Prominent styling */
+.name-field-group {
+  background: linear-gradient(135deg, #fff6ef 0%, #fff9f5 100%);
+  border: 2px solid #ffb8a3;
+  border-radius: 14px;
+  padding: 16px;
+  margin-bottom: 8px;
+  gap: 8px;
+}
+
+.name-field-label {
+  font-size: 15px;
+  font-weight: 700;
+  color: #ff6b00;
+  text-transform: none;
+  letter-spacing: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.name-field-description {
+  font-size: 12px;
+  color: #7f4f22;
+  margin: 0;
+  line-height: 1.4;
+  font-weight: 500;
+}
+
+.name-field-input {
+  padding: 14px 16px !important;
+  border: 1.5px solid #f2d6bf !important;
+  border-radius: 10px !important;
+  background: #ffffff !important;
+  color: #2f2b24 !important;
+  font-size: 15px !important;
+  font-weight: 500;
+}
+
+.name-field-input::placeholder {
+  color: #d4a374 !important;
+}
+
+.name-field-input:focus {
+  outline: none;
+  border-color: #ff6b00 !important;
+  box-shadow: 0 0 0 4px rgba(255, 107, 0, 0.12) !important;
+  background: #fffbf8 !important;
+}
+
 /* Responsive */
 @media (max-width: 600px) {
   .auth-box {

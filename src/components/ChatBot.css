@@ -336,7 +336,8 @@
 }
 
 .modal-btn-cancel,
-.modal-btn-primary {
+.modal-btn-primary,
+.modal-btn-confirm {
   padding: 10px 16px;
   border-radius: 6px;
   border: 1px solid #ffe4d6;
@@ -356,15 +357,31 @@
   border-color: #ea580c;
 }
 
-.modal-btn-primary {
+.modal-btn-primary,
+.modal-btn-confirm {
   background: linear-gradient(135deg, #ea580c 0%, #dc4c1f 100%);
   color: white;
   border-color: #ea580c;
 }
 
-.modal-btn-primary:hover {
+.modal-btn-primary:hover,
+.modal-btn-confirm:hover {
   background: linear-gradient(135deg, #dc4c1f 0%, #c94318 100%);
   box-shadow: 0 4px 12px rgba(234, 88, 12, 0.25);
+}
+
+/* Modal actions row for buttons */
+.modal-actions-row {
+  flex-direction: row;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px 0 0 0;
+  border-bottom: none !important;
+}
+
+.modal-actions-row button {
+  flex: 1;
+  min-width: 100px;
 }
 
 /* Edit Message Modal Styles */

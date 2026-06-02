@@ -21,7 +21,7 @@ const Login = ({ onLoginSuccess, onGuestLogin, onSignupSuccess }) => {
 
     const checkAuth = async () => {
       try {
-        const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+        const apiUrl = import.meta.env.VITE_API_BASE_URL || '/api';
         const response = await fetch(`${apiUrl}/auth/me`, {
           credentials: 'include'
         });

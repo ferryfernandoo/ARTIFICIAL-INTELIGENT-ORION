@@ -24,7 +24,7 @@ const ApiMarketplace = ({ onLogout }) => {
   const totalRequests = usageStats?.stats?.totalRequests || 0;
   const totalCost = usageStats?.stats?.totalCost ? usageStats.stats.totalCost.toFixed(2) : '0.00';
 
-  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || '/api';
 
   useEffect(() => {
     fetchApiKeys();

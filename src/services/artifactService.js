@@ -1,7 +1,7 @@
 // Artifact Service - Client-side API for document artifact persistence
 // Saves/loads AI-generated document content to/from the backend database
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
 /**
  * Save a new artifact (AI generation result) to the backend

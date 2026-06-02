@@ -12,6 +12,18 @@ export default defineConfig({
     cssMinify: false
   },
   server: {
-    middlewareMode: false
+    middlewareMode: false,
+    proxy: {
+      '/api': {
+        target: 'http://187.77.116.90:3001',
+        changeOrigin: true,
+        secure: false
+      },
+      '/download': {
+        target: 'http://187.77.116.90:3001',
+        changeOrigin: true,
+        secure: false
+      }
+    }
   }
 })

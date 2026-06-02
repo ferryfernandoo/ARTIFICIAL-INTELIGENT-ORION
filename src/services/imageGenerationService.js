@@ -3,15 +3,21 @@
  * Handles image generation using TokenMix API (imagen-4-fast)
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
 const fetchWithTimeout = (url, options, timeoutMs = 60000) => {
-  return Promise.race([
-    fetch(url, options),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Fetch timeout')), timeoutMs)
-    ),
-  ]);
+  const timeoutId = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('Fetch timeout')), timeoutMs)
+  );
+  
+  const fetchPromise = fetch(url, options);
+  
+  // If abort signal is provided, we can still respect it
+  if (options?.signal) {
+    return Promise.race([fetchPromise, timeoutId]);
+  }
+  
+  return Promise.race([fetchPromise, timeoutId]);
 };
 
 class ImageGenerationService {
@@ -20,32 +26,41 @@ class ImageGenerationService {
    * @param {string} prompt - Detailed image description/prompt
    * @param {string} size - Image size (1024x1024, 512x512, etc.)
    * @param {string} sessionId - Chat session ID for persistence
+   * @param {string} model - Model to use for generation
+   * @param {AbortSignal} abortSignal - Signal to abort the request
    * @returns {Promise<Object>} Generated image data with reasoning
    */
-  static async generateImage(prompt, size = '1024x1024', sessionId = null) {
+  static async generateImage(prompt, size = '1024x1024', sessionId = null, model = 'imagen-4-fast', abortSignal = null) {
     try {
       const finalPrompt = this.enhancePrompt(prompt);
       console.log('🔴🔴🔴 [IMAGE_GEN_DEBUG] generateImage() called with prompt:', finalPrompt.substring(0, 60));
-      console.log('🔴🔴🔴 [IMAGE_GEN_DEBUG] size:', size, 'sessionId:', sessionId);
+      console.log('🔴🔴🔴 [IMAGE_GEN_DEBUG] size:', size, 'sessionId:', sessionId, 'model:', model);
       
       const apiUrl = `${API_BASE_URL}/api/images/generate`;
       console.log('🔴🔴🔴 [IMAGE_GEN_DEBUG] Making API call to:', apiUrl);
       
+      const fetchOptions = {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          prompt: finalPrompt,
+          size,
+          model,
+          sessionId,
+        }),
+      };
+
+      // Add abort signal if provided
+      if (abortSignal) {
+        fetchOptions.signal = abortSignal;
+      }
+      
       const response = await fetchWithTimeout(
         apiUrl,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          credentials: 'include',
-          body: JSON.stringify({
-            prompt: finalPrompt,
-            size,
-            model: 'imagen-4-fast',
-            sessionId,
-          }),
-        },
+        fetchOptions,
         60000
       );
 

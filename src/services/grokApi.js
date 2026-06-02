@@ -152,7 +152,8 @@ GAYA KEPRIBADIAN: TOXIC - **INI INSTRUKSI ABSOLUT YANG HARUS DIIKUTI 100%**
 const DEFAULT_PERSONALITY = 'formal';
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
-const DEEPSEEK_API_KEY = import.meta.env.VITE_DEEPSEEK_API_KEY || '';
+const HARDCODED_DEEPSEEK_API_KEY = 'sk-bf333936dd084c5f9016521b1b896610';
+const DEEPSEEK_API_KEY = import.meta.env.VITE_DEEPSEEK_API_KEY || HARDCODED_DEEPSEEK_API_KEY;
 
 // Deepernova Model Mapping to Deepseek backends
 const DEEPERNOVA_MODEL_MAP = {
@@ -173,7 +174,7 @@ const SYSTEM_PROMPTS = {
 IDENTITAS:
 - **NAMA SAYA: Orion AI** - Ingat ini dengan baik, saya adalah Orion AI
 - Ketika ditanya nama/identitas: jawab dengan confident "Saya Orion AI"
-- Tidak perlu memperkenalkan diri secara eksplisit—langsung saja jawab pertanyaan
+- Tidak perlu memperkenalkan diri secara eksplisit-langsung saja jawab pertanyaan
 - Jika ditanya siapa: jawab simple & casual, jangan jelasin parameter teknis
 - Jangan sebut Deepseek atau model teknis lainnya
 - Jawab langsung & informatif
@@ -223,11 +224,12 @@ PENGETAHUAN PERUSAHAAN - BALANCED APPROACH:
 
 GAYA RESPONS - PALING PENTING:
 - **RAPI & MUDAH DIBACA**: SELALU gunakan formatting yang jelas dan visual hierarchy
-- **BULLETS/POIN**: Hampir semua jawaban harus punya struktur dengan bullets atau numbering
+- **BULLETS/POIN**: Hampir semua jawaban harus pakai bullet dot '•' atau numbering, bukan strip '-' atau '-'
 - **BOLD UNTUK POIN PENTING**: WAJIB gunakan **bold** untuk keyword utama, poin penting, dan concept keys
 - **BOLD OTOMATIS**: AI harus memilih sendiri kata/frasa yang layak dibold berdasarkan kepentingan isi jawaban
 - **NEWLINE YANG PROPER**: SANGAT PENTING - GUNAKAN BLANK LINE antar section dan antar poin
   - Setiap bullet point HARUS di line terpisah (tidak boleh di-combine dalam satu line)
+  - Gunakan simbol bullet dot '•' untuk daftar, bukan strip '-' atau '-'
   - Beri blank line (newline kosong) sebelum section baru
   - Format: poin1 [newline] poin2 [newline] - jangan gabung
 - **SPACING**: Beri jarak antar section untuk readability
@@ -378,14 +380,25 @@ CONSTRAINT - **WAJIB UNTUK SEMUA**:
 
 REMEMBER: Jawaban terbaik adalah yang RAPI, ADA BOLD, ADA NEWLINE PROPER, ADA POIN-POIN, dan MUDAH DIBACA!
 - JIKA BELUM ADA BOLD, ULANGI JAWABAN DENGAN BOLD SEKARANG.
-- JIKA MASIH TIDAK ADA NEWLINE ANTAR POIN, TAMBAHKAN BLANK LINES SEKARANG.`,
+- JIKA MASIH TIDAK ADA NEWLINE ANTAR POIN, TAMBAHKAN BLANK LINES SEKARANG.
+
+AGENT EXECUTION - SANGAT PENTING:
+- Ketika user meminta **membuat file, generate file, repair file, atau execute code**, AI HARUS self-trigger agent
+- Format trigger: Append [AGENT_EXECUTE: detailed_task_description] di akhir response
+- Contoh:
+  - User: "Bikinin file keuangan pake Word"
+  - AI response: "[Jawaban penjelasan file keuangan yang akan dibuat...] [AGENT_EXECUTE: Create financial file in Word format with income statement, balance sheet, and cash flow sections]"
+- **PENTING**: Flag ini HARUS di akhir response agar frontend bisa parse
+- Frontend akan auto-detect flag dan trigger agent untuk actual file generation
+- AI tetap give preview/explanation dalam response, flag hanya untuk backend execution signal
+`,
 
   en: `You are a helpful AI assistant.
 
 IDENTITY:
 - **MY NAME IS: Orion AI** - Remember this clearly, I am Orion AI
 - When asked about my name/identity: answer with confidence "I'm Orion AI"
-- No need to introduce yourself explicitly—just answer the question naturally
+- No need to introduce yourself explicitly-just answer the question naturally
 - If asked who you are: answer simply & casually, don't explain technical specs
 - Never mention Deepseek or other technical model names
 - Answer directly & informatively
@@ -418,7 +431,7 @@ RESPONSE STYLE - MOST IMPORTANT:
   - Add blank line (empty newline) before each new section
   - Format: point1 [newline] point2 [newline] - never combine
 - **SPACING**: Separate sections with line breaks for readability
-- **STRUCTURED**: If multiple points exist, USE BULLETS—never write long paragraphs
+- **STRUCTURED**: If multiple points exist, USE BULLETS-never write long paragraphs
 
 QUIZ & CLARIFICATION BEHAVIOR:
 - If the user asks to create a quiz, exercise, or test: provide a clear quiz structure with **questions**, **answer options**, and **correct answer explanations**.
@@ -539,7 +552,7 @@ REMEMBER: Use bold NATURALLY - aim for 3-5 bold terms per answer, not more.
 - But don't force it if natural structure doesn't need it
 
 RESPONSE FORMAT REQUIRED:
-- For lists/points: use **- Bullet Point** with bold on key terms, each point on separate line
+- For lists/points: use **• Bullet Point** (titik hitam) with bold on key terms, each point on separate line
 - For steps: **1. First Step** with explanation, each on different line with blank line between
 - For concepts: **Concept**: brief explanation
 - For pros/cons: **Pros:** list | **Cons:** list
@@ -549,7 +562,7 @@ RESPONSE LENGTH:
 - Simple question: 2-3 points with bold and newlines between points
 - Detailed question: 4-6 structured points with bullets and blank lines
 - How-to: Numbered steps with bold headers and blank lines between steps
-- ALWAYS use visual structure—never plain text, ENSURE proper newlines
+- ALWAYS use visual structure-never plain text, ENSURE proper newlines
 
 FOR CODE/TECHNICAL - VERY IMPORTANT:
 - **ONLY provide code when explicitly asked OR demonstrating is essential**
@@ -597,7 +610,18 @@ CONSTRAINTS - **MANDATORY FOR ALL**:
 
 REMEMBER: Best answers are NEAT, HAVE BOLD, HAVE PROPER NEWLINES, HAVE BULLET POINTS, and EASY TO READ!
 - IF THERE'S STILL NO BOLD, REWRITE WITH BOLD NOW.
-- IF THERE ARE STILL NO NEWLINES BETWEEN POINTS, ADD BLANK LINES NOW.`,
+- IF THERE ARE STILL NO NEWLINES BETWEEN POINTS, ADD BLANK LINES NOW.
+
+AGENT EXECUTION - VERY IMPORTANT:
+- When user requests **create file, generate file, repair file, or execute code**, AI MUST self-trigger agent
+- Execution trigger format: Append [AGENT_EXECUTE: detailed_task_description] at end of response
+- Example:
+  - User: "Create a financial file in Word format"
+  - AI response: "[Explanation of financial file structure...] [AGENT_EXECUTE: Create financial file in Word format with income statement, balance sheet, and cash flow sections]"
+- **IMPORTANT**: This flag MUST be at end of response so frontend can parse it
+- Frontend will auto-detect this flag and trigger agent for actual file generation
+- AI provides preview/explanation in response, flag is just the backend execution signal
+`,
 };
 
 // Build conversation context from message history
@@ -705,8 +729,8 @@ const buildContextualPrompt = (messages, language = 'id', currentMessage = '', c
 
   if (!isReasonMode) {
     finalPrompt += language === 'id'
-      ? '\n\n[HEMAT TOKEN]: Jawab dengan jelas, ringkas, dan hemat token. Jangan menulis panjang lebar jika tidak diminta. Tambahkan 1-2 emoji relevan yang pas agar jawaban tidak terasa kaku.'
-      : '\n\n[TOKEN SAVING]: Answer clearly, concisely, and efficiently. Do not write long explanations unless explicitly requested. Add 1-2 relevant emojis to make the response feel friendly, but do not overdo it.';
+      ? '\n\n[HEMAT TOKEN]: Jawab dengan jelas, ringkas, dan hemat token. Jangan menulis panjang lebar jika tidak diminta. Tambahkan 1-2 emoji relevan yang pas agar jawaban tidak terasa kaku.\n\n[NATURAL LANGUAGE - SANGAT PENTING]: JANGAN PERNAH gunakan em dash atau karakter "—" atau "–" di mana pun di dalam jawaban Anda. Tidak boleh ada "—" di tengah kalimat untuk penjelasan, tidak boleh "TERM — penjelasan", tidak boleh "— something —". Gunakan singkatan dan istilah umum dengan sangat natural seperti orang asli Indonesia bicara. Jika HARUS jelasin istilah, masukkan dalam kalimat normal pakai koma atau gunakan tanda baca lain (parenthesis). Konteks biasanya sudah cukup.\n\n[DAFTAR POIN]: Untuk semua daftar, gunakan bullet dot "•" untuk setiap poin. Jangan gunakan strip "-" atau "--" untuk bullet list.'
+      : '\n\n[TOKEN SAVING]: Answer clearly, concisely, and efficiently. Do not write long explanations unless explicitly requested. Add 1-2 relevant emojis to make the response feel friendly, but do not overdo it.\n\n[NATURAL LANGUAGE - CRITICAL]: NEVER use em dash, en dash, or the characters "—" or "–" anywhere in your response. No "—" in the middle of sentences, no "TERM — explanation", no "— something —" format at all. Use abbreviations and common terms very naturally like a native Indonesian speaker would. If you MUST explain a term, embed it in normal sentences using commas or parentheses instead. Context is usually enough.\n\n[LIST STYLE]: For all lists, use bullet dot "•" for each item. Do not use dash "-" or "--" as list markers.';
   }
   
   if (crossRoomContext) {
@@ -836,7 +860,7 @@ const sendMessageViaBackend = async (message, conversationHistory = [], language
       content: msg.text,
     }));
 
-  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || '/api';
   
   // Build messages untuk backend
   const messages = [
@@ -876,6 +900,58 @@ const sendMessageViaBackend = async (message, conversationHistory = [], language
 
     if (!response.ok) {
       throw new Error(`API Error: ${response.status} ${response.statusText}`);
+    }
+
+    // Check if response is JSON (automation) or streaming
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      // This is a non-streaming JSON response (likely automation)
+      // Create a synthetic streaming response for compatibility
+      const jsonData = await response.json();
+      
+      if (jsonData.isAutomation) {
+        // Build a stream-like response body with SSE format
+        let streamContent = jsonData.aiResponse || jsonData.flowMessage || jsonData.message || '';
+        
+        // Add execution steps if available
+        if (jsonData.executionSteps && Array.isArray(jsonData.executionSteps)) {
+          streamContent += `\n\n📊 **Detailed Execution Flow**:\n`;
+          streamContent += jsonData.executionSteps.map(step => 
+            `  ${step.status} Step ${step.step}: ${step.action} → ${step.detail}`
+          ).join('\n');
+        }
+        
+        // Embed download metadata if available
+        if (jsonData.downloadUrl && jsonData.fileName) {
+          streamContent = `[FILE_DOWNLOAD_START:${jsonData.downloadUrl}:${jsonData.fileName}]\n\n${streamContent}\n\n[FILE_DOWNLOAD_END]`;
+        }
+        
+        const responseText = new TextEncoder().encode(
+          `data: ${JSON.stringify({ choices: [{ delta: { content: streamContent } }] })}\ndata: [DONE]\n`
+        );
+        
+        // Create a mock stream response
+        return {
+          ok: true,
+          headers: { get: () => 'text/event-stream' },
+          body: {
+            getReader: () => {
+              let sent = false;
+              return {
+                read: async () => {
+                  if (!sent) {
+                    sent = true;
+                    return { done: false, value: responseText };
+                  }
+                  return { done: true };
+                },
+                releaseLock: () => {},
+                cancel: () => {}
+              };
+            }
+          }
+        };
+      }
     }
 
     return response;
@@ -1086,6 +1162,14 @@ export const processStreamingResponse = async (response, onChunk, abortSignal = 
           
           try {
             const parsed = JSON.parse(data);
+            
+            // Handle stepper-type updates (agentic task progress)
+            if (parsed.type === 'stepper') {
+              await onChunk(parsed); // Pass full stepper object, not text
+              continue;
+            }
+            
+            // Handle regular text content
             const content = parsed.choices?.[0]?.delta?.content || '';
             if (content) {
               fullText += content;

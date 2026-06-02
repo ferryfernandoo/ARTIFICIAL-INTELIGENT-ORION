@@ -10,6 +10,21 @@ function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [currentView, setCurrentView] = useState('chat'); // 'chat' or 'documents'
+  const [documentType, setDocumentType] = useState('docx'); // 'docx', 'xlsx', or 'ppt'
+
+  // Enhanced navigation handler that supports document type
+  const handleNavigate = (view, fileType) => {
+    setCurrentView(view);
+    if (fileType) {
+      // Map user-friendly names to editor types
+      const typeMap = {
+        'word': 'docx',
+        'excel': 'excel',
+        'ppt': 'pptx'
+      };
+      setDocumentType(typeMap[fileType] || fileType);
+    }
+  };
 
   useEffect(() => {
     const verifyAuth = async () => {
@@ -173,7 +188,7 @@ function App() {
   
   if (currentView === 'documents') {
     return (
-      <DocumentEditor user={user} onNavigate={setCurrentView} />
+      <DocumentEditor user={user} onNavigate={handleNavigate} documentType={documentType} />
     );
   }
   
@@ -184,7 +199,7 @@ function App() {
         isAuthenticated={isAuthenticated}
         isGuest={isGuest}
         onLogout={handleLogout}
-        onNavigate={setCurrentView}
+        onNavigate={handleNavigate}
         onUpdateUser={handleUpdateUser}
       />
     </>

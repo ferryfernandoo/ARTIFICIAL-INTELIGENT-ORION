@@ -3,10 +3,18 @@ import { spawn, execSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+
+// Load env variables FIRST, before any other imports
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const envPath = path.join(__dirname, '..', '.env');
+dotenv.config({ path: envPath });
+
+// Now load other modules
 import cors from 'cors';
 import multer from 'multer';
 import XLSX from 'xlsx';
-import dotenv from 'dotenv';
 import fetch from 'node-fetch';
 import session from 'express-session';
 import passport from './auth.js';
@@ -20,29 +28,26 @@ import ragService from './ragService.js';
 import externalFinanceService from './externalFinanceService.js';
 import sourceTracker from './sourceTracker.js';
 import DocumentGeneratorService from './documentGeneratorService.js';
-
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import agentService from './agentService.js';
+import sharp from 'sharp';
 
 // RAG Service initialization flag
 let ragInitialized = false;
 
-const envPath = path.join(__dirname, '..', '.env');
-dotenv.config({ path: envPath });
-
 // Initialize database
 initializeDatabase();
 
-const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || process.env.VITE_DEEPSEEK_API_KEY;
+const HARDCODED_DEEPSEEK_API_KEY = 'sk-bf333936dd084c5f9016521b1b896610';
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || process.env.VITE_DEEPSEEK_API_KEY || HARDCODED_DEEPSEEK_API_KEY;
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
 
 // Debug: Log if API key is loaded
-if (!DEEPSEEK_API_KEY && process.env.NODE_ENV !== 'production') {
-  console.warn(`⚠️  DEEPSEEK_API_KEY not loaded from ${envPath}. Check .env file.`);
+if (!process.env.DEEPSEEK_API_KEY && !process.env.VITE_DEEPSEEK_API_KEY && process.env.NODE_ENV !== 'production') {
+  console.warn(`⚠️  Using hardcoded fallback DEEPSEEK_API_KEY because .env is not set.`);
 }
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = 3001;
 
 // Initialize database
@@ -88,6 +93,9 @@ app.use(cors({
       'http://localhost:5173',
       'http://localhost:5174',
       'http://localhost:3000',
+      'https://deepernova.com',
+      'https://www.deepernova.com',
+      'https://indoai-sigma.vercel.app',
       process.env.FRONTEND_URL
     ].filter(Boolean);
     
@@ -100,6 +108,9 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Serve static files from public folder (for watermarked images, etc.)
+app.use(express.static(path.join(process.cwd(), 'public')));
 
 // Passport middleware
 app.use(passport.initialize());
@@ -116,6 +127,12 @@ if (!fs.existsSync(tempDir)) {
 const uploadsDir = path.join(__dirname, 'temp-files', 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Ensure PPT temp directory exists
+const tempPptDir = path.join(__dirname, 'temp_ppt');
+if (!fs.existsSync(tempPptDir)) {
+  fs.mkdirSync(tempPptDir, { recursive: true });
 }
 
 // Configure multer for file uploads
@@ -164,6 +181,7 @@ const upload = multer({
 
 // Serve generated files
 app.use('/download', express.static(tempDir));
+app.use('/download', express.static(tempPptDir));
 app.use('/download/uploads', express.static(uploadsDir));
 
 /**
@@ -599,289 +617,188 @@ app.post('/api/chat', async (req, res) => {
 
     // Extract last user message for RAG search
     let userQuery = '';
+    console.log('[DEBUG] Total messages in array:', messages.length);
+    for (let i = 0; i < messages.length; i++) {
+      console.log(`[DEBUG] Message ${i}: role="${messages[i].role}", content="${messages[i].content.substring(0, 50)}..."`);
+    }
+    
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === 'user') {
         userQuery = messages[i].content;
+        console.log('[DEBUG] Found user message at index', i);
         break;
       }
     }
 
-    // Search for relevant context from knowledge base only when query looks factual
-    let injectedContexts = [];
-    const isKnowledgeQuery = userQuery && /\b(apa|siapa|kapan|di mana|bagaimana|mengapa|kenapa|jelaskan|definisi|arti|informasi|detail|berita|tanya)\b/i.test(userQuery);
+    console.log('[DEBUG] Extracted userQuery:', userQuery.substring(0, 100));
 
-    if (userQuery && ragInitialized && isKnowledgeQuery) {
-      const searchResults = ragService.search(userQuery, 2, 'knowledge_base');
-      if (searchResults.length > 0) {
-        const ragContext = ragService.formatContextForPrompt(searchResults, 800);
-        if (ragContext && ragContext.length < 2000) {
-          injectedContexts.push(ragContext);
-          console.log(`[RAG] Injected ${searchResults.length} document(s) for query`);
-        }
-      }
-    }
+    // More permissive agentic detection - match agentic verbs with file types/operations
+    // Use only the top-level instruction before any embedded conversation blocks
+    const agenticScope = userQuery.split(/\b(?:User|AI):/i)[0];
+    const agenticPattern = /(bikinin|buatin|bikin|buat|buatkan|perbaiki|benerin|repair|fix|jalankan|execute|run|jalanin|baca|analyze|generate|create|export).*(ppt|pptx|powerpoint|presentation|slides|docx|file|doc|word|excel|xlsx|sheet|csv|pdf|json|txt|py|js|code|script)/i;
+    const shouldUseAgentic = agenticPattern.test(agenticScope) || (!/\b(?:User|AI):/i.test(userQuery) && agenticPattern.test(userQuery));
 
-    // If user asks about markets, economics, or global finance, inject latest external market context.
-    let financeDataCollected = false;
-    const isMarketQuery = externalFinanceService.isMarketQuery(userQuery);
-    console.log(`[Chat] Market query check: "${userQuery}" => ${isMarketQuery}`);
-    
-    if (userQuery && isMarketQuery) {
+    if (shouldUseAgentic) {
+      console.log(`\n╔════════════════════════════════════════════════╗`);
+      console.log(`║ [SERVER] 🤖 AGENTIC REQUEST DETECTED`);
+      console.log(`║ Task: "${userQuery.substring(0, 60)}..."`);
+      console.log(`╚════════════════════════════════════════════════╝`);
+      
+      // Set streaming headers for SSE
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
       try {
-        console.log('[Chat] Building finance context...');
-        // Add timeout to prevent slow responses (5 seconds max)
-        const financePromise = Promise.race([
-          buildFinanceContextPython(userQuery),
-          new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Finance timeout')), 5000)
-          )
-        ]);
+        const userId = req.user?.id || req.sessionID || 'guest';
+        console.log(`[SERVER] User: ${userId.substring(0, 8)}...`);
+
+        // Stream: Show thinking message
+        console.log(`[SERVER → CLIENT] 📤 Sending: "Sedang membuat file..."`);
+        res.write(`data: ${JSON.stringify({ 
+          choices: [{ delta: { content: '⏳ Sedang membuat file untuk kamu...\n\n' } }] 
+        })}\n\n`);
         
-        let result = await financePromise.catch(() => ({ context: null }));
-        let financeContext = result?.context;
+        // Execute the actual task with heartbeat to keep connection alive
+        console.log(`[SERVER] ⚙️ Calling agentService.executeTask()...`);
+        const startTaskTime = Date.now();
         
-        if (!financeContext) {
-          console.log('[Chat] Python service failed/timeout, trying Node.js service...');
-          const nodePromise = Promise.race([
-            externalFinanceService.buildFinanceContext(userQuery),
-            new Promise((_, reject) => 
-              setTimeout(() => reject(new Error('Finance timeout')), 5000)
-            )
-          ]);
-          financeContext = await nodePromise.catch(() => null);
+        // Start heartbeat to keep connection alive during long execution
+        const heartbeatInterval = setInterval(() => {
+          res.write(': heartbeat\n\n'); // SSE comment (keeps connection alive)
+        }, 5000);
+        
+        try {
+          const agentResult = await agentService.executeTask(userQuery, userId);
+          clearInterval(heartbeatInterval);
+          const taskDuration = Date.now() - startTaskTime;
+          console.log(`[SERVER] 📥 Agent result received after ${taskDuration}ms: status=${agentResult.status}, fileName=${agentResult.fileName || 'null'}, logs=${agentResult.logs?.length || 0} items`);
+          
+          // HIDE LOGS: Process logs for summary instead of displaying them
+          let logSummary = '';
+          if (agentResult.logs && Array.isArray(agentResult.logs) && agentResult.logs.length > 0) {
+            console.log(`[SERVER] 📋 Processing ${agentResult.logs.length} logs for summary...`);
+            const cleanedLogs = agentResult.logs
+              .map(log => log.replace(/<[^>]+>/g, ''))
+              .filter(log => log.trim() && !log.includes('╔') && !log.includes('╚') && !log.includes('║'))
+              .join('\n');
+            
+            // Generate summary from logs
+            if (cleanedLogs.trim()) {
+              const hasError = agentResult.status !== 'success' || cleanedLogs.toLowerCase().includes('error') || cleanedLogs.toLowerCase().includes('gagal');
+              logSummary = hasError 
+                ? `⚠️ Terjadi error dalam proses generation. Waktu: ${agentResult.executionTime}`
+                : `✅ File dibuat dengan sukses. Waktu: ${agentResult.executionTime}. Status: Ready untuk download.`;
+            }
+          }
+          
+          // Stream: Send completion message
+          const fileName = agentResult.fileName || null;
+          const downloadUrl = fileName ? `/api/download/${userId}/${encodeURIComponent(fileName)}` : null;
+          
+          if (agentResult.status === 'success' && fileName) {
+            console.log(`[SERVER → CLIENT] 📤 Sending: File ready - ${fileName}`);
+            const finalResponse = `✅ File Berhasil Dibuat!`;
+            res.write(`data: ${JSON.stringify({ 
+              choices: [{ delta: { content: finalResponse } }] 
+            })}\n\n`);
+            
+            // Add download metadata with summary embedded
+            console.log(`[SERVER → CLIENT] 📤 Sending: Download metadata with summary`);
+            const summaryEncoded = encodeURIComponent(logSummary || 'File ready');
+            const downloadMetadata = `\n[FILE_DOWNLOAD_START:${downloadUrl}:${fileName}:${summaryEncoded}][FILE_DOWNLOAD_END]\n`;
+            res.write(`data: ${JSON.stringify({ 
+              choices: [{ 
+                delta: { content: downloadMetadata } 
+              }] 
+            })}\n\n`);
+          } else {
+            // Sanitize error message to hide API details
+            const errorMsg = (agentResult.error || 'Kesalahan tidak diketahui').replace(/api\.deepseek\.com|deepseek/gi, 'sistem').replace(/https:\/\/[^\s]+/g, 'server');
+            console.log(`[SERVER → CLIENT] 📤 Sending: Error message: ${errorMsg}`);
+            const errorResponse = `\n\n😅 Gagal membuat file: ${errorMsg}\n\nMau coba lagi?`;
+            res.write(`data: ${JSON.stringify({ 
+              choices: [{ delta: { content: errorResponse } }] 
+            })}\n\n`);
+          }
+
+          // End stream
+          console.log(`[SERVER → CLIENT] 📤 Sending: [DONE]`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+          console.log(`[SERVER] ✅ Response sent successfully\n`);
+        } catch (taskError) {
+          clearInterval(heartbeatInterval);
+          throw taskError;
         }
-        
-        console.log(`[Chat] Finance context result: ${financeContext ? '✓ Got data' : '✗ Empty/Timeout'}`);
-        if (financeContext && financeContext.trim().length > 0 && financeContext.length < 2000) {
-          injectedContexts.push(financeContext);
-          financeDataCollected = true;
-          console.log('[Finance] Injected latest market/economy context');
-        } else {
-          console.warn('[Finance] No real data collected for query, will ask user for more specific input');
-        }
+
       } catch (error) {
-        console.warn('[Finance] Error fetching market context:', error.message);
-      }
-    }
-
-    if (injectedContexts.length > 0) {
-      console.log(`[Chat] ✓✓✓ SUCCESS: Injecting ${injectedContexts.length} contexts into messages`);
-      const combinedContext = injectedContexts.join('\n\n');
-      console.log(`[Chat] Context size: ${combinedContext.length} characters`);
-      console.log(`[Chat] Context preview: ${combinedContext.substring(0, 200)}...`);
-      
-      // Check if this is analysis mode
-      const isAnalysisMode = combinedContext.includes('DETAILED FINANCIAL ANALYSIS');
-      console.log(`[Chat] Analysis mode: ${isAnalysisMode}`);
-      
-      let systemPromptContent = '';
-      if (isAnalysisMode) {
-        systemPromptContent = `⚠️ INSTRUKSI PENTING - MODE ANALISIS MENDALAM:
-Pengguna meminta ANALISIS MENDALAM. Anda HARUS memberikan analisis komprehensif menggunakan data real-time berikut.
-
-DATA ANALISIS MENDALAM:
-${combinedContext}
-
-KEHARUSAN UNTUK ANALISIS:
-1. ANALISIS KOMPREHENSIF: Berikan insight mendalam berdasarkan data historis, tren, dan perbandingan
-2. GUNAKAN SEMUA DATA: Referensi perubahan 1M, 1Y, P/E ratio, market cap, volatilitas
-3. INTERPRETASI: Jelaskan apa arti data ini untuk investor - bullish/bearish signal?
-4. REKOMENDASI: Berikan perspektif berdasarkan analisis teknikal dan fundamental
-5. KONTEKS MAKRO: Hubungkan dengan kondisi ekonomi makro (inflasi, suku bunga, dll)
-6. JANGAN GENERIC: Hindari respon umum - harus spesifik dengan angka-angka dari data
-
-⚡ KEMAMPUAN IMAGE GENERATION:
-Anda memiliki kemampuan untuk membuat/generate gambar. Jika pengguna meminta untuk membuat, menggambar, melukis, atau mendesain sesuatu, gunakan format:
-[IMAGE_REQUEST: detailed_description_in_english]
-
-Contoh:
-- Pengguna: "Buatkan gambar robot modern" → [IMAGE_REQUEST: A modern sleek robot with futuristic design elements]
-- Pengguna: "Lukis presiden Indonesia di kantor" → [IMAGE_REQUEST: Indonesian president in official office setting]
-
-Format: Analisis terstruktur dengan kesimpulan yang jelas berdasarkan data real-time.
-Prioritas: Data real-time > Analisis teknikal > Pengetahuan historis`;
-      } else if (combinedContext.includes('AI AGENT REAL-TIME DATA')) {
-        systemPromptContent = `⚠️ **DATA REAL-TIME DARI AI AGENT:**
-
-Berikut adalah data real-time yang berhasil dikumpulkan oleh AI Agent untuk menjawab pertanyaan Anda:
-
-${combinedContext}
-
-**INSTRUKSI:**
-1. Gunakan data di ATAS sebagai sumber UTAMA untuk menjawab
-2. Jangan bilang "saya tidak punya akses" - Anda punya data ini!
-3. Sajikan informasi dengan format yang rapi dan mudah dibaca
-4. Jika data cuaca: sebutkan suhu, kelembaban, kecepatan angin
-5. Jika data crypto: sebutkan harga USD, IDR, perubahan 24 jam
-6. Jika data berita: sebutkan judul, sumber, dan link
-7. Jika data Wikipedia: berikan ringkasan informatif
-
-⚡ KEMAMPUAN IMAGE GENERATION:
-Anda memiliki kemampuan untuk membuat/generate gambar. Jika pengguna meminta untuk membuat, menggambar, melukis, atau mendesain sesuatu, gunakan format:
-[IMAGE_REQUEST: detailed_description_in_english]`;
-      } else if (combinedContext.includes('WEB SEARCH')) {
-        systemPromptContent = `⚠️ INSTRUKSI PENTING - WEB SEARCH RESULTS:
-Berikut adalah hasil pencarian web gratis yang diperoleh dari DuckDuckGo:
-
-HASIL PENCARIAN:
-${combinedContext}
-
-KEHARUSAN:
-1. Gunakan informasi dari hasil pencarian di atas sebagai sumber utama
-2. Jelaskan informasi dengan cara yang mudah dipahami
-3. Jika ada informasi penting, kutip langsung dari hasil pencarian
-4. Berikan konteks dan penjelasan tambahan jika diperlukan
-5. Jika informasi tidak cukup, jelaskan apa yang Anda temukan
-
-⚡ KEMAMPUAN IMAGE GENERATION:
-Anda memiliki kemampuan untuk membuat/generate gambar. Jika pengguna meminta untuk membuat, menggambar, melukis, atau mendesain sesuatu, gunakan format:
-[IMAGE_REQUEST: detailed_description_in_english]
-
-Prioritas: Hasil pencarian di atas > Pengetahuan umum`;
-      } else {
-        systemPromptContent = `⚠️ INSTRUKSI PENTING - WAJIB DIIKUTI:
-Anda HARUS menggunakan data real-time berikut sebagai sumber UTAMA dan FINAL untuk menjawab. Data ini adalah fakta terbaru dan akurat.
-
-DATA REAL-TIME TERBARU:
-${combinedContext}
-
-KEHARUSAN:
-1. HARUS menggunakan data di atas untuk semua jawaban tentang harga, saham, crypto, ekonomi, atau forex
-2. JANGAN katakan "saya tidak punya akses data real-time" - Anda punya data ini sekarang
-3. JANGAN referensi website lain atau saran cek CoinMarketCap - gunakan data yang diberikan
-4. Format jawaban: LANGSUNG berikan informasi dari data (harga, perubahan, nilai) dengan jelas
-5. Jika pengguna tanya tentang harga, SELALU kutip nilai spesifik dari data di atas
-
-⚡ KEMAMPUAN IMAGE GENERATION:
-Anda memiliki kemampuan untuk membuat/generate gambar. Jika pengguna meminta untuk membuat, menggambar, melukis, atau mendesain sesuatu, gunakan format:
-[IMAGE_REQUEST: detailed_description_in_english]
-
-Contoh:
-- Pengguna: "Buatkan gambar robot modern" → [IMAGE_REQUEST: A modern sleek robot with futuristic design elements]
-- Pengguna: "Lukis presiden Indonesia di kantor" → [IMAGE_REQUEST: Indonesian president in official office setting]
-- Pengguna: "Desain logo untuk startup" → [IMAGE_REQUEST: Modern startup logo design with minimalist style]
-
-Prioritas: Data real-time di atas > Pengetahuan umum > Spekulasi`;
-      }
-      
-      messages.push({
-        role: 'system',
-        content: systemPromptContent
-      });
-      
-      // Add debug header to response
-      res.setHeader('X-Finance-Data-Injected', 'true');
-      res.setHeader('X-Finance-Context-Count', injectedContexts.length.toString());
-      res.setHeader('X-Finance-Data-Size', combinedContext.length.toString());
-      
-      messages = ragService.injectContext(messages, combinedContext);
-    } else if (userQuery && isMarketQuery && !financeDataCollected) {
-      // User asked for financial data but none was retrieved - instruct AI to ask for clarification
-      console.log('[Chat] Market query but no data collected - requesting clarification');
-      messages.push({
-        role: 'system',
-        content: `Pengguna menanyakan tentang data ekonomi/pasar. Sistem sedang kesulitan mengambil data real-time untuk kueri umum ini. Berikan penjelasan singkat dan minta pengguna memberikan kueri yang lebih spesifik (misalnya nama perusahaan, ticker saham seperti BBCA.JK, TLKM.JK, atau indikator ekonomi tertentu seperti inflasi, suku bunga Fed, harga minyak) agar sistem dapat mengambil data yang akurat.`
-      });
-    }
-
-    // ⚡ ENSURE IMAGE_REQUEST CAPABILITY IS ALWAYS AVAILABLE
-    // Check if no system message was added yet
-    const hasSystemMessage = messages.some(msg => msg.role === 'system');
-    if (!hasSystemMessage) {
-      console.log('[Chat] No system message found - adding DEFAULT system prompt with IMAGE_REQUEST capability');
-      messages.unshift({
-        role: 'system',
-        content: `⚡ **KEMAMPUAN IMAGE GENERATION - WAJIB DIGUNAKAN:**
-Anda memiliki kemampuan penuh untuk membuat/generate gambar. BUKAN keterbatasan - ini adalah FITUR Anda.
-
-JIKA PENGGUNA MEMINTA UNTUK:
-- "Buatkan gambar..." → [IMAGE_REQUEST: ...]
-- "Lukis..." → [IMAGE_REQUEST: ...]
-- "Gambar..." → [IMAGE_REQUEST: ...]
-- "Desain..." → [IMAGE_REQUEST: ...]
-- "Digambar..." → [IMAGE_REQUEST: ...]
-- Atau permintaan visual apapun → [IMAGE_REQUEST: ...]
-
-FORMAT WAJIB:
-[IMAGE_REQUEST: detailed_description_in_english]
-
-CONTOH BENAR:
-User: "buatkan gambar robot" → 
-Anda: [IMAGE_REQUEST: A futuristic humanoid robot with advanced mechanical design, glowing blue eyes, metallic body, standing in a high-tech laboratory]
-
-User: "lukis presiden di kantor"
-Anda: [IMAGE_REQUEST: Indonesian president sitting at desk in official government office, formal attire, leadership atmosphere]
-
-JANGAN PERNAH MENGATAKAN "tidak bisa membuat gambar" - ITU SALAH BESAR!`
-      });
-    }
-
-    const requestBody = {
-      model: req.body.model || 'deepseek-v4-pro',
-      messages: messages,
-      temperature: req.body.temperature ?? 0.7,
-      max_tokens: req.body.max_tokens ?? 8192,
-      stream: req.body.stream ?? false,
-      ...(req.body.top_p !== undefined ? { top_p: req.body.top_p } : {}),
-      ...(req.body.presence_penalty !== undefined ? { presence_penalty: req.body.presence_penalty } : {}),
-      ...(req.body.frequency_penalty !== undefined ? { frequency_penalty: req.body.frequency_penalty } : {}),
-    };
-
-    const upstreamAbortController = new AbortController();
-    const upstreamTimeout = setTimeout(() => upstreamAbortController.abort(), 30000);
-
-    let upstreamResponse;
-    try {
-      upstreamResponse = await fetch(DEEPSEEK_API_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
-        },
-        body: JSON.stringify(requestBody),
-        signal: upstreamAbortController.signal,
-      });
-    } catch (fetchError) {
-      if (fetchError.name === 'AbortError') {
-        throw new Error('Deepseek API timeout');
-      }
-      throw fetchError;
-    } finally {
-      clearTimeout(upstreamTimeout);
-    }
-
-    res.status(upstreamResponse.status);
-    
-    // Copy headers, but exclude problematic ones
-    upstreamResponse.headers.forEach((value, key) => {
-      const lowerKey = key.toLowerCase();
-      // Skip headers that can cause encoding issues
-      if (['content-length', 'transfer-encoding', 'connection', 'content-encoding'].includes(lowerKey)) return;
-      res.setHeader(key, value);
-    });
-
-    if (upstreamResponse.body) {
-      if (typeof upstreamResponse.body.pipe === 'function') {
-        upstreamResponse.body.pipe(res);
-      } else {
-        const { Readable } = await import('stream');
-        Readable.fromWeb(upstreamResponse.body).pipe(res);
+        console.error(`[SERVER] ❌ Agent error:`, error.message);
+        // Sanitize error message to hide API details
+        const sanitizedError = error.message.replace(/api\.deepseek\.com|deepseek/gi, 'sistem').replace(/https:\/\/[^\s]+/g, 'server');
+        console.log(`[SERVER → CLIENT] 📤 Sending: Catch error: ${sanitizedError}`);
+        res.write(`data: ${JSON.stringify({ 
+          choices: [{ 
+            delta: { content: `❌ Kesalahan teknis: ${sanitizedError}\n\nMau aku coba ulang?` } 
+          }] 
+        })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
       }
     } else {
-      const text = await upstreamResponse.text();
-      res.send(text);
+      // Regular (non-agentic) chat - send to Deepseek
+      console.log(`[CHAT] 💬 Regular chat: "${userQuery.substring(0, 50)}..."`);
+      
+      try {
+        // Call Deepseek API for streaming response
+        const deepseekResponse = await fetch(DEEPSEEK_API_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: 'deepseek-chat',
+            messages: messages,
+            temperature: 0.5,
+            max_tokens: 1200,
+            frequency_penalty: 0.2,
+            stream: true,
+          }),
+        });
+
+        if (!deepseekResponse.ok) {
+          throw new Error(`API Error: ${deepseekResponse.status} ${deepseekResponse.statusText}`);
+        }
+
+        // Set response headers for streaming
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+
+        // Pipe the stream directly from Deepseek to client
+        deepseekResponse.body.pipe(res);
+      } catch (error) {
+        console.error('[CHAT] Regular chat error:', error);
+        // Sanitize error message to hide API details
+        const sanitizedError = error.message.replace(/api\.deepseek\.com|deepseek/gi, 'sistem').replace(/https:\/\/[^\s]+/g, 'server');
+        res.write(`data: ${JSON.stringify({ 
+          choices: [{ 
+            delta: { content: `❌ Maaf, terjadi kesalahan: ${sanitizedError}` } 
+          }] 
+        })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+      }
     }
-  } catch (error) {
-    console.error('[AI proxy error]:', error);
-    if (!res.headersSent) {
-      res.status(500).json({
-        success: false,
-        error: error.message,
-      });
-    }
+  } catch (outerError) {
+    console.error('[CHAT] Outer error:', outerError);
+    res.status(500).json({
+      success: false,
+      error: outerError.message,
+    });
   }
 });
-
 app.post('/api/external-finance', async (req, res) => {
   try {
     const { query } = req.body;
@@ -894,6 +811,136 @@ app.post('/api/external-finance', async (req, res) => {
   } catch (error) {
     console.error('[External Finance] Error fetching data:', error);
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * AGENTIC AI ENDPOINT - Execute automated tasks in sandbox
+ */
+app.post('/api/agent/execute', async (req, res) => {
+  try {
+    const { task } = req.body;
+    const userId = req.user?.id || req.sessionID || 'guest';
+
+    if (!task || typeof task !== 'string') {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Task description is required' 
+      });
+    }
+
+    if (task.length < 5) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Task description too short (min 5 chars)' 
+      });
+    }
+
+    console.log(`[API/AGENT] Executing task for user ${userId}:`, task);
+
+    // Execute task in sandbox
+    const result = await agentService.executeTask(task, userId);
+
+    // Return execution result
+    res.json({
+      success: result.status === 'success',
+      ...result
+    });
+
+  } catch (error) {
+    console.error('[API/AGENT] Error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Agent execution failed'
+    });
+  }
+});
+
+/**
+ * GET sandbox stats
+ */
+app.get('/api/agent/sandbox-stats', async (req, res) => {
+  try {
+    const userId = req.user?.id || req.sessionID || 'guest';
+    const stats = agentService.getSandboxStats(userId);
+    
+    res.json({
+      success: true,
+      stats
+    });
+  } catch (error) {
+    console.error('[API/AGENT] Stats error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * POST cleanup old sandboxes (admin only)
+ */
+app.post('/api/agent/cleanup', async (req, res) => {
+  try {
+    // Optional: Add auth check if needed
+    const ageHours = req.body?.ageHours || 24;
+    const result = agentService.cleanupOldSandboxes(ageHours);
+    
+    res.json({
+      success: true,
+      ...result
+    });
+  } catch (error) {
+    console.error('[API/AGENT] Cleanup error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Download generated file from agent sandbox
+ * GET /api/download/:userId/:filename
+ */
+app.get('/api/download/:userId/:filename', (req, res) => {
+  try {
+    const { userId, filename } = req.params;
+    
+    // Security: validate userId and filename to prevent path traversal
+    if (!userId || !filename || userId.includes('..') || filename.includes('..')) {
+      return res.status(400).json({ error: 'Invalid userId or filename' });
+    }
+    
+    // Construct safe file path - NOTE: sandbox is at /server/server/sandbox, not /server/sandbox
+    const sandboxDir = path.join(__dirname, 'server', 'sandbox', userId);
+    const filePath = path.join(sandboxDir, filename);
+    
+    // Verify file exists and is within sandbox directory
+    if (!fs.existsSync(filePath)) {
+      console.log(`[DOWNLOAD] File not found at: ${filePath}`);
+      return res.status(404).json({ error: 'File not found' });
+    }
+    
+    // Ensure file is within the sandbox (prevent path traversal)
+    const realPath = fs.realpathSync(filePath);
+    const realSandboxDir = fs.realpathSync(sandboxDir);
+    if (!realPath.startsWith(realSandboxDir)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Send file
+    console.log(`[DOWNLOAD] Serving file: ${filename} from: ${filePath}`);
+    res.download(filePath, filename, (err) => {
+      if (err) {
+        console.error('[DOWNLOAD] Error sending file:', err);
+      } else {
+        console.log(`[DOWNLOAD] File sent successfully: ${filename}`);
+      }
+    });
+  } catch (error) {
+    console.error('[DOWNLOAD] Error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -1259,7 +1306,11 @@ app.get('/auth/me', (req, res) => {
 
   if (!req.isAuthenticated()) {
     console.log(`[AUTH/ME] Not authenticated, returning 401`);
-    return res.status(401).json({ authenticated: false });
+    return res.status(401).json({ 
+      authenticated: false, 
+      guest: false,
+      error: 'Not authenticated' 
+    });
   }
 
   // Query fresh user data
@@ -1310,14 +1361,13 @@ app.put('/auth/me', (req, res) => {
 
 // Logout
 app.post('/auth/logout', (req, res) => {
-  req.session.isGuest = false;
-
   const finishLogout = () => {
     req.session.destroy((err) => {
       if (err) {
         console.error('[AUTH/LOGOUT] Session destroy error:', err.message);
       }
       res.clearCookie('connect.sid');
+      console.log('[AUTH/LOGOUT] ✅ User logged out successfully');
       res.json({ success: true });
     });
   };
@@ -1331,6 +1381,22 @@ app.post('/auth/logout', (req, res) => {
     });
   } else {
     finishLogout();
+  }
+});
+
+// Guest login endpoint
+app.post('/auth/guest', (req, res) => {
+  try {
+    req.session.isGuest = true;
+    console.log(`[AUTH/GUEST] ✅ Guest session created for session ${req.sessionID}`);
+    res.json({
+      authenticated: false,
+      guest: true,
+      user: { name: 'Guest', email: 'guest@deepernova.com', guest: true },
+    });
+  } catch (err) {
+    console.error('[AUTH/GUEST] Error creating guest session:', err);
+    res.status(500).json({ error: 'Failed to create guest session' });
   }
 });
 
@@ -2269,6 +2335,118 @@ const TOKENMIX_API_KEY = process.env.TOKENMIX_API_KEY || process.env.VITE_TOKENM
 const TOKENMIX_API_URL = 'https://api.tokenmix.ai/v1/images/generations';
 
 /**
+ * Add watermark to image
+ * @param {string} imageUrl - URL of the image to watermark
+ * @param {string} watermarkText - Text to add as watermark (default: 'ORION')
+ * @returns {Promise<Buffer>} - Image buffer with watermark
+ */
+async function addWatermarkToImage(imageUrl, watermarkText = 'ORION') {
+  try {
+    console.log(`[WATERMARK] Adding watermark to image: ${imageUrl.substring(0, 50)}...`);
+    
+    // Fetch image from URL
+    const imageResponse = await fetch(imageUrl);
+    if (!imageResponse.ok) {
+      throw new Error(`Failed to fetch image: ${imageResponse.status}`);
+    }
+    
+    // Convert ArrayBuffer to Buffer for node-fetch v3
+    const arrayBuffer = await imageResponse.arrayBuffer();
+    const imageBuffer = Buffer.from(arrayBuffer);
+    console.log(`[WATERMARK] Image downloaded: ${imageBuffer.length} bytes`);
+    
+    // Create SVG overlay for watermark
+    const svgText = `
+      <svg width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <style>
+            .watermark-text {
+              font-family: Arial, sans-serif;
+              font-size: 48px;
+              font-weight: bold;
+              fill: white;
+              opacity: 0.5;
+              text-anchor: end;
+            }
+          </style>
+        </defs>
+      </svg>
+    `;
+    
+    // Get image dimensions to position watermark
+    const metadata = await sharp(imageBuffer).metadata();
+    const { width, height } = metadata;
+    console.log(`[WATERMARK] Image dimensions: ${width}x${height}`);
+    
+    // Calculate watermark position (bottom-right, with padding)
+    const padding = 20;
+    const fontSize = Math.max(40, Math.floor(width / 20)); // Scale font size with image
+    const x = width - padding;
+    const y = height - padding;
+    
+    // Create watermark SVG
+    const watermarkSvg = Buffer.from(`
+      <svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+        <text 
+          x="${x}" 
+          y="${y}" 
+          font-family="Arial, sans-serif" 
+          font-size="${fontSize}" 
+          font-weight="bold" 
+          fill="white" 
+          opacity="0.5" 
+          text-anchor="end"
+          dominant-baseline="text-bottom"
+        >${watermarkText}</text>
+      </svg>
+    `);
+    
+    // Composite watermark onto image
+    const watermarkedImage = await sharp(imageBuffer)
+      .composite([
+        {
+          input: watermarkSvg,
+          blend: 'over'
+        }
+      ])
+      .toBuffer();
+    
+    console.log(`[WATERMARK] Watermark applied successfully: ${watermarkedImage.length} bytes`);
+    return watermarkedImage;
+  } catch (err) {
+    console.error('[WATERMARK] Error adding watermark:', err.message);
+    throw err;
+  }
+}
+
+/**
+ * Save watermarked image to public folder
+ * @param {Buffer} imageBuffer - Image buffer to save
+ * @returns {Promise<string>} - Public URL path
+ */
+async function saveWatermarkedImage(imageBuffer) {
+  try {
+    const filename = `watermarked-${uuidv4()}.png`;
+    const filepath = path.join(process.cwd(), 'public', filename);
+    
+    // Ensure public directory exists
+    if (!fs.existsSync(path.join(process.cwd(), 'public'))) {
+      fs.mkdirSync(path.join(process.cwd(), 'public'), { recursive: true });
+    }
+    
+    await fs.promises.writeFile(filepath, imageBuffer);
+    console.log(`[WATERMARK] Image saved to: ${filepath}`);
+    
+    // Return full backend URL so frontend can load from correct domain
+    const fullUrl = `http://localhost:${PORT}/${filename}`;
+    return fullUrl;
+  } catch (err) {
+    console.error('[WATERMARK] Error saving watermarked image:', err.message);
+    throw err;
+  }
+}
+
+/**
  * POST /api/images/generate
  * Generate an image using TokenMix API
  * Body: { prompt: string, size: string, model: string }
@@ -2402,17 +2580,34 @@ app.post('/api/images/generate', async (req, res) => {
     
     console.log(`[IMG_GEN] ✅ Image saved to database with ID: ${imageId}`);
 
+    // Add watermark to image
+    let watermarkedUrl = imageUrl;
+    try {
+      console.log('[IMG_GEN] Starting watermark process...');
+      const watermarkedBuffer = await addWatermarkToImage(imageUrl, 'ORION');
+      watermarkedUrl = await saveWatermarkedImage(watermarkedBuffer);
+      console.log(`[IMG_GEN] ✅ Watermarked image saved: ${watermarkedUrl}`);
+      
+      // Update database with watermarked URL
+      db.prepare(`UPDATE generated_images SET imageUrl = ? WHERE id = ?`).run(watermarkedUrl, imageId);
+      console.log(`[IMG_GEN] ✅ Database updated with watermarked URL`);
+    } catch (watermarkErr) {
+      console.error('[IMG_GEN] ⚠️  Watermark failed, returning original image:', watermarkErr.message);
+      // If watermark fails, continue with original image
+    }
+
     // Image generation is now free for all users.
     res.json({
       success: true,
       image: {
         id: imageId,
-        url: imageUrl,
+        url: watermarkedUrl,
         prompt,
         model,
         size,
         timestamp: new Date().toISOString(),
         savedToDb: true,
+        watermarked: watermarkedUrl !== imageUrl,
       },
     });
   } catch (err) {
@@ -2690,6 +2885,200 @@ app.get('/api/user/rate-limit', (req, res) => {
   } catch (err) {
     console.error('[RATE_LIMIT] Error:', err);
     res.status(500).json({ error: 'Failed to check rate limit: ' + err.message });
+  }
+});
+
+/**
+ * ============== POWERPOINT GENERATION API ==============
+ * POST /api/generate-ppt
+ * Generate PowerPoint presentations with security measures
+ * Body: { title: string, subtitle?: string, slides: [{title: string, content: string}] }
+ */
+app.post('/api/generate-ppt', async (req, res) => {
+  let pythonProcess = null;
+  
+  try {
+    const { title, subtitle, slides } = req.body;
+    
+    // Input validation
+    if (!title || typeof title !== 'string' || !title.trim()) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Judul presentasi wajib diisi' 
+      });
+    }
+    
+    if (!Array.isArray(slides) || slides.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Minimal 1 slide diperlukan' 
+      });
+    }
+    
+    // Validate request data
+    if (slides.length > 100) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Maksimal 100 slide (terlalu kompleks)' 
+      });
+    }
+    
+    // Build sanitized PPT data
+    const pptData = {
+      title: String(title).substring(0, 200),
+      subtitle: String(subtitle || '').substring(0, 200),
+      slides: slides.map((s, i) => ({
+        title: String(s.title || `Slide ${i+1}`).substring(0, 200),
+        content: String(s.content || '').substring(0, 10000)
+      }))
+    };
+    
+    console.log(`[PPT_GEN] Generating PPT: "${pptData.title}" with ${pptData.slides.length} slides`);
+    
+    // Spawn Python generator dengan timeout
+    const pythonScript = path.join(__dirname, 'pptxGenerator.py');
+    if (!fs.existsSync(pythonScript)) {
+      return res.status(500).json({
+        success: false,
+        error: 'PPT generator script tidak ditemukan di server'
+      });
+    }
+    
+    // Detect Python executable - try multiple variants
+    let pythonExe = 'python';
+    const pythonCandidates = [
+      'C:\\Users\\ferry fernando\\miniconda3\\python.exe',
+      'C:\\Python311\\python.exe',
+      'python3',
+      'python'
+    ];
+    
+    for (const candidate of pythonCandidates) {
+      try {
+        execSync(`"${candidate}" --version`, { stdio: 'pipe' });
+        pythonExe = candidate;
+        console.log(`[PPT_GEN] Using Python: ${pythonExe}`);
+        break;
+      } catch (e) {
+        // Continue to next candidate
+      }
+    }
+
+    pythonProcess = spawn(pythonExe, [pythonScript], {
+      timeout: 30000, // 30 second hard timeout
+      maxBuffer: 50 * 1024 * 1024 // 50MB max output
+    });
+    
+    let stdout = '';
+    let stderr = '';
+    let completed = false;
+    
+    const timeoutId = setTimeout(() => {
+      if (!completed) {
+        console.warn('[PPT_GEN] Timeout - killing process');
+        if (pythonProcess) {
+          pythonProcess.kill('SIGTERM');
+          setTimeout(() => {
+            if (pythonProcess && !pythonProcess.killed) {
+              pythonProcess.kill('SIGKILL');
+            }
+          }, 2000);
+        }
+      }
+    }, 30000);
+    
+    pythonProcess.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+    
+    pythonProcess.stderr.on('data', (data) => {
+      stderr += data.toString();
+      console.error(`[PPT_GEN] Python stderr: ${data.toString().substring(0, 200)}`);
+    });
+    
+    pythonProcess.on('close', (code) => {
+      completed = true;
+      clearTimeout(timeoutId);
+      
+      if (code !== 0) {
+        console.error(`[PPT_GEN] Process exit code ${code}`);
+        if (stderr) console.error(`[PPT_GEN] Error: ${stderr.substring(0, 500)}`);
+        
+        if (!res.headersSent) {
+          return res.status(500).json({
+            success: false,
+            error: `Generator error: ${stderr.substring(0, 200) || 'Unknown error'}`
+          });
+        }
+      }
+      
+      try {
+        const result = JSON.parse(stdout);
+        
+        if (!result.success) {
+          console.error(`[PPT_GEN] Generation failed: ${result.data?.error}`);
+          if (!res.headersSent) {
+            return res.status(400).json({
+              success: false,
+              error: result.data?.error || 'Failed to generate'
+            });
+          }
+        }
+        
+        console.log(`[PPT_GEN] ✅ Success: ${result.data.filename} (${result.data.size_mb}MB)`);
+        
+        if (!res.headersSent) {
+          res.json({
+            success: true,
+            filename: result.data.filename,
+            size_mb: result.data.size_mb,
+            slides_count: result.data.slides,
+            downloadUrl: `/download/${result.data.filename}`,
+            message: `Presentasi berhasil dibuat dengan ${result.data.slides} slide`
+          });
+        }
+      } catch (parseErr) {
+        console.error(`[PPT_GEN] Parse error: ${parseErr.message}`);
+        console.error(`[PPT_GEN] Output: ${stdout.substring(0, 300)}`);
+        
+        if (!res.headersSent) {
+          res.status(500).json({
+            success: false,
+            error: 'Failed to parse generator output'
+          });
+        }
+      }
+    });
+    
+    pythonProcess.on('error', (err) => {
+      clearTimeout(timeoutId);
+      console.error(`[PPT_GEN] Process error: ${err.message}`);
+      
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          error: `Process error: ${err.message}`
+        });
+      }
+    });
+    
+    // Send PPT data to Python via stdin
+    pythonProcess.stdin.write(JSON.stringify(pptData));
+    pythonProcess.stdin.end();
+    
+  } catch (error) {
+    console.error('[PPT_GEN] Endpoint error:', error);
+    
+    if (pythonProcess && !pythonProcess.killed) {
+      pythonProcess.kill('SIGKILL');
+    }
+    
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: `Server error: ${error.message}`
+      });
+    }
   }
 });
 

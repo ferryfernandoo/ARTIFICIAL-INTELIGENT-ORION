@@ -32,7 +32,7 @@ const DocumentGenerator = ({ isOpen, onClose, fileType = 'word', content, title 
     setProgress([]);
 
     try {
-      const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+      const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
       const endpoint = fileType === 'word' 
         ? `${API_BASE_URL}/api/documents/generate/word`
         : `${API_BASE_URL}/api/documents/generate/excel`;

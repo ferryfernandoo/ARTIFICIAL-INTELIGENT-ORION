@@ -4,7 +4,7 @@
  * Used by Deepseek to understand image content before responding
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3001');
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
 class VisionAnalysisService {
   /**

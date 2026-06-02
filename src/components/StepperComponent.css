@@ -1,0 +1,205 @@
+.stepper-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.05) 0%, rgba(59, 130, 246, 0.05) 100%);
+  border-radius: 12px;
+  border-left: 3px solid #6366f1;
+  margin: 16px 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+.stepper-step {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  animation: stepFadeIn 0.4s ease-out;
+}
+
+@keyframes stepFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.step-icon-wrapper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  margin-top: 2px;
+}
+
+.step-icon {
+  font-size: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-weight: bold;
+  transition: all 0.3s ease;
+}
+
+.step-icon.step-complete {
+  color: #10b981;
+  font-size: 16px;
+}
+
+.step-icon.step-active {
+  color: #3b82f6;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.step-icon.step-pending {
+  color: #d1d5db;
+}
+
+.step-icon.step-error {
+  color: #ef4444;
+}
+
+.step-content {
+  flex: 1;
+  padding-top: 2px;
+}
+
+.step-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: #1f2937;
+  letter-spacing: -0.3px;
+  margin-bottom: 4px;
+}
+
+.step-content .step-name {
+  color: #111827;
+}
+
+.step-detail {
+  font-size: 13px;
+  color: #6b7280;
+  line-height: 1.4;
+  margin-top: 2px;
+  word-break: break-word;
+}
+
+/* Status-specific styling */
+.stepper-step.step-complete .step-name {
+  color: #059669;
+}
+
+.stepper-step.step-complete .step-detail {
+  color: #10b981;
+  opacity: 0.9;
+}
+
+.stepper-step.step-active .step-name {
+  color: #1d4ed8;
+  font-weight: 700;
+}
+
+.stepper-step.step-active .step-detail {
+  color: #3b82f6;
+  opacity: 1;
+}
+
+.stepper-step.step-pending .step-name {
+  color: #9ca3af;
+}
+
+.stepper-step.step-pending .step-detail {
+  color: #d1d5db;
+}
+
+.stepper-step.step-error .step-name {
+  color: #dc2626;
+  font-weight: 700;
+}
+
+.stepper-step.step-error .step-detail {
+  color: #ef4444;
+  font-weight: 500;
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+  .stepper-container {
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(59, 130, 246, 0.1) 100%);
+    border-left-color: #818cf8;
+  }
+
+  .step-name {
+    color: #f3f4f6;
+  }
+
+  .step-detail {
+    color: #d1d5db;
+  }
+
+  .stepper-step.step-complete .step-name {
+    color: #6ee7b7;
+  }
+
+  .stepper-step.step-complete .step-detail {
+    color: #a7f3d0;
+  }
+
+  .stepper-step.step-active .step-name {
+    color: #93c5fd;
+  }
+
+  .stepper-step.step-active .step-detail {
+    color: #bfdbfe;
+  }
+
+  .stepper-step.step-pending .step-name {
+    color: #9ca3af;
+  }
+
+  .stepper-step.step-error .step-name {
+    color: #fca5a5;
+  }
+
+  .stepper-step.step-error .step-detail {
+    color: #f87171;
+  }
+}
+
+/* Responsive */
+@media (max-width: 640px) {
+  .stepper-container {
+    padding: 12px;
+    gap: 10px;
+    margin: 12px 0;
+  }
+
+  .stepper-step {
+    gap: 10px;
+  }
+
+  .step-name {
+    font-size: 13px;
+  }
+
+  .step-detail {
+    font-size: 12px;
+  }
+}

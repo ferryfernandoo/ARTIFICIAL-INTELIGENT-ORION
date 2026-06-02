@@ -68,7 +68,7 @@ const RegisterForm = ({ onRegisterSuccess, onSwitchToLogin }) => {
 
     setLoading(true);
     try {
-      const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+      const apiUrl = import.meta.env.VITE_API_BASE_URL || '/api';
       const response = await fetch(`${apiUrl}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -105,16 +105,18 @@ const RegisterForm = ({ onRegisterSuccess, onSwitchToLogin }) => {
         {error && <div className="error-message">{error}</div>}
 
         <form className="auth-form" onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label>Nama Lengkap</label>
+          <div className="form-group name-field-group">
+            <label className="name-field-label">👋 Siapa nama kamu?</label>
+            <p className="name-field-description">Supaya Orion bisa manggil kamu dengan benar</p>
             <input
               type="text"
               name="name"
               value={formData.name}
               onChange={handleChange}
-              placeholder="Nama Anda"
+              placeholder="Contoh: Nando"
               autoComplete="name"
               disabled={loading}
+              className="name-field-input"
             />
           </div>
 

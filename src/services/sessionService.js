@@ -3,7 +3,7 @@
  * Handles saving/loading chat sessions and messages
  */
 
-const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+const API_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
 export const sessionService = {
   // Create new session

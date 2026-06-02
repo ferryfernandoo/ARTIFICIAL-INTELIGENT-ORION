@@ -13,7 +13,10 @@ import { detectLanguage, highlightCode, cleanCodeBlock } from '../utils/codeHigh
 import VoiceChat from './VoiceChat';
 import ApiMarketplace from './ApiMarketplace';
 import DocumentGenerator from './DocumentGenerator';
+import FileTypeSelector from './FileTypeSelector';
 import ChartGenerator from './ChartGenerator';
+import StepperComponent from './StepperComponent';
+import ExecutionFlow from './ExecutionFlow';
 import './ChatBot.css';
 
 // Code Structure Parser - untuk menampilkan struktur kode seperti tree
@@ -318,14 +321,20 @@ const getTimeBasedGreeting = (userName = '') => {
   const hour = new Date().getHours();
   let greeting = '';
   
-  if (hour >= 5 && hour < 11) {
+  if (hour >= 5 && hour < 10) {
     greeting = 'Selamat Pagi';
-  } else if (hour >= 11 && hour < 15) {
+  } else if (hour >= 10 && hour < 11) {
+    greeting = 'Selamat Pagi';
+  } else if (hour >= 11 && hour < 14) {
     greeting = 'Selamat Siang';
+  } else if (hour >= 14 && hour < 15) {
+    greeting = 'Selamat Sore';
   } else if (hour >= 15 && hour < 18) {
     greeting = 'Selamat Sore';
-  } else if (hour >= 18 && hour < 21) {
+  } else if (hour >= 18 && hour < 20) {
     greeting = 'Selamat Petang';
+  } else if (hour >= 20 && hour < 21) {
+    greeting = 'Selamat Malam';
   } else if (hour >= 21 && hour < 24) {
     greeting = 'Selamat Malam';
   } else {
@@ -336,6 +345,11 @@ const getTimeBasedGreeting = (userName = '') => {
     return `${greeting}, ${userName}`;
   }
   return greeting;
+};
+
+const FALLBACK_GREETINGS = {
+  greeting: 'Selamat Siang',
+  hint: 'Sebaiknya kita mulai dari mana?'
 };
 
 
@@ -390,6 +404,7 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
   const [documentGeneratorType, setDocumentGeneratorType] = useState('word'); // 'word' or 'excel'
   const [documentGeneratorContent, setDocumentGeneratorContent] = useState(''); // Content for document
   const [documentGeneratorTitle, setDocumentGeneratorTitle] = useState(''); // Title for document
+  const [showFileTypeSelector, setShowFileTypeSelector] = useState(false); // File type selector modal
   const [currentSources, setCurrentSources] = useState([]); // Current conversation sources
   const [selectedSource, setSelectedSource] = useState(null); // Selected source for detail view
   const [foundSources, setFoundSources] = useState([]); // Sources found during search
@@ -399,8 +414,14 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
   const [messageFeedback, setMessageFeedback] = useState({}); // Track like/dislike feedback for messages: { messageId: 'like'|'dislike'|null }
   const [playingMessageId, setPlayingMessageId] = useState(null); // Currently playing TTS message ID
   const [ttsLoading, setTtsLoading] = useState(null); // Message ID currently generating TTS
+  const [aiGreeting, setAiGreeting] = useState(null); // AI-generated greeting
+  const [aiHint, setAiHint] = useState(null); // AI-generated hint for empty chat
+  const [generatingGreeting, setGeneratingGreeting] = useState(false); // Loading state for AI greeting
+  const [agenticSteppers, setAgenticSteppers] = useState({}); // Track stepper progress by messageId: { messageId: [{ stepNumber, stepName, detail, status }] }
+  const [executionFlows, setExecutionFlows] = useState({}); // Track execution flows: { messageId: { steps: [...], isComplete: bool, totalTime: ms } }
   const textareaElementRef = useRef(null);
   const resizeFrameRef = useRef(null);
+  const greetingGenerationRef = useRef(false);
 
   const scheduleTextareaResize = (textarea) => {
     if (!textarea) return;
@@ -411,6 +432,152 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
       textarea.style.height = 'auto';
       textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
     });
+  };
+
+  const parseStreamingText = async (response) => {
+    if (!response?.body) {
+      try {
+        const text = await response.text();
+        return text ? text.trim() : '';
+      } catch {
+        return '';
+      }
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let text = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const jsonStr = line.slice(6).trim();
+          if (!jsonStr || jsonStr === '[DONE]') continue;
+          try {
+            const json = JSON.parse(jsonStr);
+            if (json.choices?.[0]?.delta?.content) {
+              text += json.choices[0].delta.content;
+            }
+          } catch (_e) {
+            // ignore parse errors for partial chunks
+          }
+        }
+      }
+
+      if (buffer.startsWith('data: ')) {
+        const jsonStr = buffer.slice(6).trim();
+        if (jsonStr && jsonStr !== '[DONE]') {
+          try {
+            const json = JSON.parse(jsonStr);
+            if (json.choices?.[0]?.delta?.content) {
+              text += json.choices[0].delta.content;
+            }
+          } catch (_e) {
+            // ignore final parse errors
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    if (!text.trim()) {
+      try {
+        const fallbackText = await response.text();
+        return fallbackText ? fallbackText.trim() : '';
+      } catch {
+        return '';
+      }
+    }
+
+    return text.trim();
+  };
+
+  const sanitizeWelcomeText = (text) => {
+    if (!text) return '';
+    return text
+      .replace(/\*\*(.*?)\*\*/g, '$1')
+      .replace(/\*(.*?)\*/g, '$1')
+      .replace(/\s+/g, ' ')
+      .trim();
+  };
+
+  const generateAIWelcomeText = async () => {
+    if (messages.length > 0 || greetingGenerationRef.current) return;
+    
+    greetingGenerationRef.current = true;
+    setGeneratingGreeting(true);
+    
+    try {
+      const hour = new Date().getHours();
+      let timeContext = '';
+      let expectedGreeting = '';
+      
+      if (hour >= 5 && hour < 10) {
+        timeContext = 'pagi (05:00-10:00)';
+        expectedGreeting = 'Selamat Pagi';
+      } else if (hour >= 10 && hour < 11) {
+        timeContext = 'menjelang siang (10:00-11:00)';
+        expectedGreeting = 'Selamat Pagi';
+      } else if (hour >= 11 && hour < 14) {
+        timeContext = 'siang (11:00-14:00)';
+        expectedGreeting = 'Selamat Siang';
+      } else if (hour >= 14 && hour < 15) {
+        timeContext = 'menjelang sore (14:00-15:00)';
+        expectedGreeting = 'Selamat Sore';
+      } else if (hour >= 15 && hour < 18) {
+        timeContext = 'sore (15:00-18:00)';
+        expectedGreeting = 'Selamat Sore';
+      } else if (hour >= 18 && hour < 20) {
+        timeContext = 'petang (18:00-20:00)';
+        expectedGreeting = 'Selamat Petang';
+      } else if (hour >= 20 && hour < 21) {
+        timeContext = 'menjelang malam (20:00-21:00)';
+        expectedGreeting = 'Selamat Malam';
+      } else if (hour >= 21 && hour < 24) {
+        timeContext = 'malam (21:00-24:00)';
+        expectedGreeting = 'Selamat Malam';
+      } else {
+        timeContext = 'larut malam (00:00-05:00)';
+        expectedGreeting = 'Selamat Larut Malam';
+      }
+      
+      const greetingPrompt = `Buatkan salam pembuka untuk user "${userName || 'Teman'}" pada waktu ${timeContext}.\n\nPanduan:\n- Gunakan format: "${expectedGreeting}, ${userName || 'Teman'}!"\n- Maksimal 50 karakter\n- Harus include "${expectedGreeting}" yang sesuai waktu\n- Natural dan ramah\n\nBuatkan HANYA salam, tanpa penjelasan apapun.`;
+      
+      const greetingResponse = await sendMessageToGrok(greetingPrompt, []);
+      const generatedGreeting = sanitizeWelcomeText(await parseStreamingText(greetingResponse));
+      
+      if (generatedGreeting && generatedGreeting.length > 5) {
+        setAiGreeting(generatedGreeting);
+      } else {
+        setAiGreeting(getTimeBasedGreeting(userName));
+      }
+
+      const hintPrompt = `Buatkan satu kalimat singkat sebagai petunjuk untuk memulai chat dengan Orion. Gunakan bahasa Indonesia yang ramah dan sederhana. Contoh: "Tanya tentang materi sekolah atau tugas kuliah."`;
+      const hintResponse = await sendMessageToGrok(hintPrompt, []);
+      const generatedHint = sanitizeWelcomeText(await parseStreamingText(hintResponse));
+      
+      if (generatedHint && generatedHint.length > 5) {
+        setAiHint(generatedHint);
+      } else {
+        setAiHint(FALLBACK_GREETINGS.hint);
+      }
+    } catch (error) {
+      console.error('[ChatBot] AI welcome generation failed:', error.message);
+      setAiGreeting(getTimeBasedGreeting(userName));
+      setAiHint(FALLBACK_GREETINGS.hint);
+    } finally {
+      setGeneratingGreeting(false);
+      greetingGenerationRef.current = false;
+    }
   };
 
   useEffect(() => {
@@ -482,6 +649,16 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
     saveUserName('Teman');
   };
 
+  // Generate greeting when chat is empty or conversation changes
+  useEffect(() => {
+    if (messages.length === 0) {
+      setAiGreeting(null);
+      setAiHint(null);
+      greetingGenerationRef.current = false;
+      generateAIWelcomeText();
+    }
+  }, [currentConversationId, userName, messages.length]);
+
   const getSourceLogo = (source) => {
     const iconValue = source?.sourceIcon || source?.icon || '';
     if (iconValue && /^(https?:\/\/|\/).+\.(png|jpe?g|svg|webp)$/i.test(iconValue)) {
@@ -528,7 +705,7 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
   const [imageUploadInput, setImageUploadInput] = useState(null); // Ref for hidden image input
   const [attachmentQueueMinimized, setAttachmentQueueMinimized] = useState(false); // Minimize/maximize attachment queue container
 
-  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3001');
+  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || '/api';
   const retryIntervalRef = useRef(null);
   const messagesEndRef = useRef(null);
   const streamingIntervalRef = useRef(null);
@@ -545,6 +722,7 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
   const partialMessageIdRef = useRef(null);
   const autoRetryTimeoutRef = useRef(null);
   const autoRetryCountRef = useRef(0);
+  const backgroundAgentCountRef = useRef(0); // number of running background agent tasks
   const prevHasCodeRef = useRef(false);
   const manuallyNamedConversationsRef = useRef(new Set()); // Track which conversations have manual titles
   const MAX_AUTO_RETRY = 3;
@@ -579,10 +757,40 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
           const duration = msg.reasoningStartTime 
             ? Math.round((Date.now() - msg.reasoningStartTime) / 1000) 
             : 0;
+          
+          // Extract download metadata if present
+          let downloadUrl = null;
+          let fileName = null;
+          let downloadSummary = null;
+          let cleanText = msg.text;
+          
+          const downloadMatch = msg.text?.match(/\[(?:FILE_DOWNLOAD_START|FILEDOWNLOADSTART):([^:]+):([^:]+):?([^\]]*)\]/);
+          if (downloadMatch) {
+            downloadUrl = downloadMatch[1];
+            fileName = downloadMatch[2];
+            // Decode summary if provided
+            if (downloadMatch[3]) {
+              try {
+                downloadSummary = decodeURIComponent(downloadMatch[3]);
+              } catch (e) {
+                downloadSummary = downloadMatch[3];
+              }
+            }
+            // Remove download metadata markers from display text
+            cleanText = msg.text
+              .replace(/\[(?:FILE_DOWNLOAD_START|FILEDOWNLOADSTART):[^\]]*\]\n*/g, '') // Remove metadata with optional newlines
+              .replace(/\[(?:FILE_DOWNLOAD_END|FILEDOWNLOADEND)\]\n*/g, ''); // Remove end marker
+            cleanText = removeDownloadStatusLines(cleanText);
+          }
+          
           return { 
-            ...msg, 
+            ...msg,
+            text: cleanText,
             isStreaming: false,
-            reasoningDuration: duration 
+            reasoningDuration: duration,
+            downloadUrl,
+            fileName,
+            downloadSummary
           };
         }
         return msg;
@@ -598,6 +806,71 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
     const closeTags = (accumulatedText.match(/<\/reasoning>/gi) || []).length;
     const currentlyInReasoning = openTags > closeTags;
     return currentlyInReasoning || reasoningTag.test(chunk);
+  };
+
+  /**
+   * Parse execution flow steps from server response chunks
+   * Detects patterns like:
+   * - [STEP 1/3] Generating Python code...
+   * - 📖 [AGENT] Reading skill file...
+   * - ✅ [AGENT] Skill file loaded (16246 chars, 533 lines)
+   * - [STEP 2/3] Executing code in sandbox...
+   * etc.
+   */
+  const parseExecutionStep = (text) => {
+    const lines = text.split('\n');
+    const steps = [];
+    let currentTime = Date.now();
+
+    for (const line of lines) {
+      // Match step patterns
+      if (line.includes('[STEP')) {
+        // Pattern: [STEP X/Y] Description
+        const match = line.match(/\[STEP (\d+)\/(\d+)\]\s*(.*?)(?:\s*\.\.\.)?$/);
+        if (match) {
+          steps.push({
+            emoji: '⚙️',
+            name: match[3] || 'Processing',
+            message: line.trim(),
+            status: 'active',
+            duration: 0
+          });
+        }
+      } else if (line.includes('📖 [AGENT]') && line.includes('Reading')) {
+        // Reading skill file
+        steps.push({
+          emoji: '📖',
+          name: 'Reading Skill File',
+          message: line.trim().replace(/📖 \[AGENT\]\s*/, ''),
+          status: 'active',
+          duration: 0
+        });
+      } else if (line.includes('✅ [AGENT]') && line.includes('Skill file loaded')) {
+        // Mark previous reading step as complete
+        if (steps.length > 0) {
+          steps[steps.length - 1].status = 'complete';
+          // Extract duration from message if available
+          const durationMatch = line.match(/\((\d+)\s*chars/);
+          if (durationMatch) {
+            steps[steps.length - 1].detail = `${durationMatch[1]} chars loaded`;
+          }
+        }
+      } else if (line.includes('✅ [STEP')) {
+        // Step complete
+        const match = line.match(/✅ \[STEP (\d+)\/(\d+)\]\s*(.*?)\s*\((\d+)ms\)/);
+        if (match && steps.length > 0) {
+          steps[steps.length - 1].status = 'complete';
+          steps[steps.length - 1].duration = parseInt(match[4]) || 0;
+        }
+      } else if (line.includes('❌') || line.includes('Error')) {
+        // Error step
+        if (steps.length > 0) {
+          steps[steps.length - 1].status = 'error';
+        }
+      }
+    }
+
+    return steps.filter(s => s.name && s.name.trim());
   };
 
   // Handle paste events - intercept text paste and add to queue instead of input
@@ -820,8 +1093,8 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
     } finally {
       setLogoutLoading(false);
       setShowLogoutConfirm(false);
-      onLogout?.();
       resetLocalStorageData();
+      onLogout?.();
     }
   };
 
@@ -831,6 +1104,9 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
       'orion_memory_system',
       'orion_message_feedback',
       'orion_chat_branches',
+      'authUser',
+      'guestSession',
+      'chatbot_last_conversation',
     ];
     keysToClear.forEach((key) => {
       try {
@@ -839,6 +1115,7 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
         console.error(`Failed to remove ${key}:`, e);
       }
     });
+    console.log('[ChatBot] LocalStorage cleared for logout');
   };
 
   const getLatestConversation = (loaded) => {
@@ -895,6 +1172,8 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
           setCurrentConversationId(targetConv.id);
           setMessages(targetConv.messages);
           rememberConversationId(targetConv.id);
+          setTimeout(() => scrollToBottom(true), 150);
+          setTimeout(() => scrollToBottom(true), 350);
           return;
         }
         
@@ -1658,6 +1937,15 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
   const [dismissingAlert, setDismissingAlert] = useState(false);
   const alertTimeoutRef = useRef(null);
 
+  // Helper to show error banner only when there are no background agent tasks running
+  const showErrorBanner = (msg) => {
+    if (backgroundAgentCountRef.current > 0 || isProcessingRef.current) {
+      console.log('[ChatBot] Suppressed error banner because backend still processing:', msg);
+      return;
+    }
+    setError(msg);
+  };
+
   useEffect(() => {
     if (!customAlert || customAlert.duration === 0) return;
 
@@ -2046,7 +2334,7 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
       let fullText = '';
       let editChunkQueue = [];
       let isProcessingEditChunks = false;
-      const CHUNK_DELAY_MS = 120;
+      const CHUNK_DELAY_MS = selectedModel === 'deepernova-1.2-flash' ? 650 : 120;
 
       const processEditQueuedChunks = async () => {
         if (isProcessingEditChunks || editChunkQueue.length === 0) return;
@@ -2089,7 +2377,7 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
     } catch (err) {
       console.error('Error sending edited message:', err);
       setConvLoading(false);
-      setError('Gagal mengirim pesan yang diedit');
+        showErrorBanner('Gagal mengirim pesan yang diedit');
     }
     
     // Scroll to bottom
@@ -2550,12 +2838,71 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
     return null;
   };
 
+  const isExecutionLogLine = (line) => {
+    if (!line) return false;
+    const trimmed = line.trim();
+    const patterns = [
+      /^\[STEP \d+\/\d+\]/,
+      /^📖 \[AGENT\]/,
+      /^✅ \[AGENT\]/,
+      /^⚠️\s*\[AGENT\]/,
+      /^🔍/,
+      /^📁/,
+      /^📤/,
+      /^🔧/,
+      /^╔|^╚|^║/,
+      /^: heartbeat$/i,
+    ];
+    return patterns.some((rx) => rx.test(trimmed));
+  };
+
+  const removeExecutionLogLines = (text) => {
+    return text
+      .split(/\r?\n/)
+      .filter((line) => !isExecutionLogLine(line))
+      .join('\n');
+  };
+
+  const removeDownloadStatusLines = (text) => {
+    return text
+      .split(/\r?\n/)
+      .filter((line) => {
+        const trimmed = line.trim();
+        return !/^(✅\s*(File siap|File ready)|📄\s*File:|⏱️\s*(Waktu|Time):)/i.test(trimmed);
+      })
+      .join('\n')
+      .trim();
+  };
+
   // Improved formatMessageText - better handling of code blocks and tables
   const formatMessageText = (text, isStreaming = false, messageId = null) => {
     if (!text) return text;
 
     // Remove any stray reasoning tags before formatting
     let processedText = text.replace(/<\/?reasoning>/gi, '');
+    processedText = removeExecutionLogLines(processedText);
+
+    // Extract file download info if present
+    let downloadUrl = null;
+    let fileName = null;
+    let downloadSummary = null;
+    const downloadMatch = processedText.match(/\[(?:FILE_DOWNLOAD_START|FILEDOWNLOADSTART):([^:]+):([^:]+):?([^\]]*)\]/);
+    if (downloadMatch) {
+      downloadUrl = downloadMatch[1];
+      fileName = downloadMatch[2];
+      // Decode summary if provided
+      if (downloadMatch[3]) {
+        try {
+          downloadSummary = decodeURIComponent(downloadMatch[3]);
+        } catch (e) {
+          downloadSummary = downloadMatch[3];
+        }
+      }
+      // Remove the download markers from text
+      processedText = processedText.replace(/\[(?:FILE_DOWNLOAD_START|FILEDOWNLOADSTART):[^\]]*\]\n*/g, '');
+      processedText = processedText.replace(/\[(?:FILE_DOWNLOAD_END|FILEDOWNLOADEND)\]\n*/g, '');
+      processedText = removeDownloadStatusLines(processedText);
+    }
 
     const quizNode = parseQuizText(processedText, messageId);
     if (quizNode) return quizNode;
@@ -2735,8 +3082,8 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
           const lineCount = cleanedCode.split('\n').length;
           const lineNumbers = Array.from({ length: lineCount }, (_, i) => i + 1);
           const codeBlockId = `code-${codeMatch[1]}`;
-          // Default to collapsed, only expand if explicitly set to false
-          const isCollapsed = collapsedCodeBlocks[codeBlockId] !== false;
+          // Code blocks are EXPANDED by default, only collapse if explicitly set to true
+          const isCollapsed = collapsedCodeBlocks[codeBlockId] === true;
           
           // Get language icon
           const languageIcons = {
@@ -2969,6 +3316,46 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
           }
         }
       }
+    }
+    
+    // Add download button if file download info is available
+    if (downloadUrl && fileName) {
+      result.push(
+        <div key="download-button" className="file-download-container" style={{
+          marginTop: '12px',
+          padding: '12px',
+          backgroundColor: 'rgba(59, 130, 246, 0.1)',
+          borderRadius: '8px',
+          border: '1px solid rgba(59, 130, 246, 0.3)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px'
+        }}>
+          <span style={{ fontSize: '18px' }}>📥</span>
+          <a 
+            href={downloadUrl}
+            download={fileName}
+            className="download-file-button"
+            style={{
+              flex: 1,
+              padding: '8px 12px',
+              backgroundColor: '#3b82f6',
+              color: 'white',
+              borderRadius: '6px',
+              textDecoration: 'none',
+              fontWeight: '500',
+              display: 'inline-block',
+              textAlign: 'center',
+              cursor: 'pointer',
+              transition: 'background-color 0.2s'
+            }}
+            onMouseEnter={(e) => e.target.style.backgroundColor = '#2563eb'}
+            onMouseLeave={(e) => e.target.style.backgroundColor = '#3b82f6'}
+          >
+            📩 Download: {fileName}
+          </a>
+        </div>
+      );
     }
     
     return <>{result}</>;
@@ -3204,7 +3591,7 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
       let fullText = '';
       let imgChunkQueue = [];
       let isProcessingImgChunks = false;
-      const CHUNK_DELAY_MS = 120;
+      const CHUNK_DELAY_MS = selectedModel === 'deepernova-1.2-flash' ? 650 : 120;
 
       const processImgQueuedChunks = async () => {
         if (isProcessingImgChunks || imgChunkQueue.length === 0) return;
@@ -3245,7 +3632,7 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
       setConvLoading(false);
     } catch (err) {
       if (err.name !== 'AbortError') {
-        setError(`Error: ${err.message}`);
+        showErrorBanner(`Error: ${err.message}`);
       }
     }
   };
@@ -3278,9 +3665,13 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
     // Define variables outside try block so they're accessible in catch
     let placeholderId = Date.now() + '_img';
     let thinkingStartTime;
+    const imageAbortController = new AbortController();
     
     try {
       console.log('[ChatBot] Starting inline image generation for:', imageRequest.prompt);
+      
+      // Store abort controller so handleStopStreaming can abort it
+      abortControllersMapRef.current.set('image-' + placeholderId, imageAbortController);
       
       // Add user message to chat
       setMessages((prev) => [...prev, userMessage]);
@@ -3339,7 +3730,9 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
       const imageData = await ImageGenerationService.generateImage(
         refinedPrompt,
         imageRequest.size || '1024x1024',
-        currentConversationId
+        currentConversationId,
+        'imagen-4-fast',
+        imageAbortController.signal
       );
       console.log('[ChatBot] 🟡 Step 5: Image generated successfully');
       const generationTime = Math.round((Date.now() - thinkingStartTime) / 1000);
@@ -3407,42 +3800,58 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
       console.log('[ChatBot] Image generation completed successfully, clearing processing lock');
       isProcessingRef.current = false;
       
+      // Clean up the abort controller
+      abortControllersMapRef.current.delete('image-' + placeholderId);
+      
     } catch (err) {
       console.error('[ChatBot] Image generation error:', err);
 
-      // Update the thinking placeholder to show the failure clearly
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === placeholderId
-            ? {
-                ...msg,
-                text: `❌ Gagal membuat gambar: ${err.message}`,
-                isThinking: false,
-                isError: true,
-              }
-            : msg
-        )
-      );
+      // Don't show error if it was aborted (user cancelled)
+      if (err.name === 'AbortError') {
+        console.log('[ChatBot] Image generation cancelled by user');
+        // Remove the thinking message
+        setMessages((prev) =>
+          prev.filter((msg) => msg.id !== placeholderId)
+        );
+      } else {
+        // Update the thinking placeholder to show the failure clearly
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === placeholderId
+              ? {
+                  ...msg,
+                  text: `❌ Gagal membuat gambar: ${err.message}`,
+                  isThinking: false,
+                  isError: true,
+                }
+              : msg
+          )
+        );
 
-      // Show error message in chat as a separate fallback
-      const errorId = Date.now() + '_err';
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: errorId,
-          text: `❌ Gagal membuat gambar: ${err.message}`,
-          sender: 'bot',
-          timestamp: new Date(),
-          isError: true,
-        },
-      ]);
+        // Show error message in chat as a separate fallback
+        const errorId = Date.now() + '_err';
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: errorId,
+            text: `❌ Gagal membuat gambar: ${err.message}`,
+            sender: 'bot',
+            timestamp: new Date(),
+            isError: true,
+          },
+        ]);
 
-      setError(`Failed to generate image: ${err.message}`);
+        showErrorBanner(`Failed to generate image: ${err.message}`);
+      }
+
       setConvLoading(false);
       
       // CRITICAL: Clear the processing lock flag
       console.log('[ChatBot] Error occurred, clearing processing lock flag');
       isProcessingRef.current = false;
+      
+      // Clean up the abort controller
+      abortControllersMapRef.current.delete('image-' + placeholderId);
     }
   };
 
@@ -3469,6 +3878,7 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
 
 
   const handleSendMessage = async (e) => {
+    console.log('[DEBUG] handleSendMessage called with e:', e);
     e.preventDefault();
 
     // Check if there's any message content to send (regular text OR text queue OR uploaded images OR uploaded files)
@@ -3477,7 +3887,13 @@ const ChatBot = ({ onLogout, user, isAuthenticated, isGuest, onNavigate, onUpdat
     const hasUploadedImages = uploadedImages.length > 0;
     const hasUploadedFiles = uploadedFiles.length > 0;
 
-    if (!hasRegularText && !hasQueuedText && !hasUploadedImages && !hasUploadedFiles) return;
+    console.log('[DEBUG] hasRegularText:', hasRegularText, 'inputValue:', inputValue);
+    console.log('[DEBUG] hasQueuedText:', hasQueuedText, 'hasUploadedImages:', hasUploadedImages, 'hasUploadedFiles:', hasUploadedFiles);
+
+    if (!hasRegularText && !hasQueuedText && !hasUploadedImages && !hasUploadedFiles) {
+      console.log('[DEBUG] No content to send, returning');
+      return;
+    }
 
     // Analyze uploaded images first (non-blocking, runs in background)
     let analysisResults = {};
@@ -3560,26 +3976,6 @@ Penjelasan langkah demi langkah tentang bagaimana Anda memproses dan menjawab pe
 Setelah section <reasoning>, tuliskan jawaban lengkap Anda.
 
 Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
-    }
-
-    // Direct image request detection: route explicit image prompts straight to image generation
-    const directImageRequest = checkForImageRequest(fullMessage);
-    if (directImageRequest) {
-      console.log('[ChatBot] Direct image request detected before RAG/token processing. Bypassing chat model.');
-      const userMessageForChat = {
-        id: Date.now(),
-        text: directImageRequest.messageWithoutDirective || directImageRequest.prompt || inputValue,
-        sender: 'user',
-        timestamp: new Date(),
-        files: uploadedFiles.length > 0 ? uploadedFiles : null,
-        textQueue: textQueue.length > 0 ? textQueue : null,
-          images: uploadedImages.length > 0 ? uploadedImages : null,
-      }
-      if (globalThis.textareaRef) {
-        globalThis.textareaRef.style.height = 'auto';
-      }
-      await handleInlineImageGeneration(directImageRequest, userMessageForChat);
-      return;
     }
 
     // Auto-include follow-up image context for active images
@@ -3789,7 +4185,7 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
       let accumulatedText = '';
       let chunkQueue = [];
       let isProcessingChunks = false;
-      const CHUNK_DELAY_MS = 120; // Delay antara chunks untuk non-reasoning (ms)
+      const CHUNK_DELAY_MS = selectedModel === 'deepernova-1.2-flash' ? 650 : 120; // Delay antara chunks untuk non-reasoning (ms)
 
       const processQueuedChunks = async () => {
         if (isProcessingChunks || chunkQueue.length === 0) return;
@@ -3798,21 +4194,46 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
         while (chunkQueue.length > 0) {
           const chunk = chunkQueue.shift();
           
-          // Update the message in real-time as chunks arrive without forcing auto-scroll
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === placeholderId
-                ? { ...msg, text: msg.text + chunk }
-                : msg
-            )
-          );
-
-          // Deteksi apakah sedang di dalam reasoning tag
-          const isInReasoning = isReasoningChunk(accumulatedText, chunk);
+          // Handle stepper-type updates (skip from text accumulation)
+          if (typeof chunk === 'object' && chunk.type === 'stepper') {
+            // Update stepper progress state
+            setAgenticSteppers((prev) => {
+              const stepped = prev[placeholderId] || [];
+              const existingStepIdx = stepped.findIndex(s => s.stepNumber === chunk.stepNumber);
+              if (existingStepIdx >= 0) {
+                // Update existing step
+                const updated = [...stepped];
+                updated[existingStepIdx] = chunk;
+                return { ...prev, [placeholderId]: updated };
+              } else {
+                // Add new step
+                return { ...prev, [placeholderId]: [...stepped, chunk] };
+              }
+            });
+            continue; // Don't process stepper as text
+          }
           
-          // Delay hanya untuk non-reasoning chunks
-          if (!isInReasoning && chunkQueue.length > 0) {
-            await new Promise(resolve => setTimeout(resolve, CHUNK_DELAY_MS));
+          // Handle regular text chunks
+          if (typeof chunk === 'string') {
+            const visibleChunk = removeExecutionLogLines(chunk);
+            if (visibleChunk.trim()) {
+              // Update the message in real-time as chunks arrive without forcing auto-scroll
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === placeholderId
+                    ? { ...msg, text: msg.text + visibleChunk }
+                    : msg
+                )
+              );
+            }
+
+            // Deteksi apakah sedang di dalam reasoning tag
+            const isInReasoning = isReasoningChunk(accumulatedText, chunk);
+            
+            // Delay hanya untuk non-reasoning chunks
+            if (!isInReasoning && chunkQueue.length > 0) {
+              await new Promise(resolve => setTimeout(resolve, CHUNK_DELAY_MS));
+            }
           }
         }
 
@@ -3821,27 +4242,51 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
 
       // Process streaming response - chunks come in real-time
       await processStreamingResponse(response, (chunk) => {
-        accumulatedText += chunk;
-        chunkQueue.push(chunk);
-        processQueuedChunks();
+        // Handle stepper-type updates (don't accumulate as text)
+        if (typeof chunk === 'object' && chunk.type === 'stepper') {
+          chunkQueue.push(chunk);
+          processQueuedChunks();
+          return;
+        }
+        
+        // Handle regular text chunks
+        if (typeof chunk === 'string') {
+          accumulatedText += chunk;
+          chunkQueue.push(chunk);
+          processQueuedChunks();
 
-        // Extract reasoning from accumulated text for live popup
-        if (isReasonMode) {
-          const reasoningMatch = accumulatedText.match(/<reasoning>([\s\S]*?)<\/?reasoning>/i);
-          if (reasoningMatch) {
-            const reasoning = reasoningMatch[1].trim();
-            if (reasoning) {
-              setReasoningPopupText(reasoning);
-              setShowReasoningPopup(true);
-            }
-          } else if (accumulatedText.includes('<reasoning>') && !accumulatedText.includes('</reasoning>')) {
-            // Still inside reasoning tag - show partial content
-            const partialMatch = accumulatedText.match(/<reasoning>([\s\S]*)$/i);
-            if (partialMatch) {
-              const partial = partialMatch[1].trim();
-              if (partial) {
-                setReasoningPopupText(partial);
+          // Parse execution flow steps in real-time from accumulated text
+          const currentSteps = parseExecutionStep(accumulatedText);
+          if (currentSteps && currentSteps.length > 0) {
+            setExecutionFlows((prev) => ({
+              ...prev,
+              [placeholderId]: {
+                steps: currentSteps,
+                isComplete: false,
+                totalTime: Date.now() - streamingStartTimeRef.current,
+                title: "🤖 Orion berfikir..."
+              }
+            }));
+          }
+
+          // Extract reasoning from accumulated text for live popup
+          if (isReasonMode) {
+            const reasoningMatch = accumulatedText.match(/<reasoning>([\s\S]*?)<\/?reasoning>/i);
+            if (reasoningMatch) {
+              const reasoning = reasoningMatch[1].trim();
+              if (reasoning) {
+                setReasoningPopupText(reasoning);
                 setShowReasoningPopup(true);
+              }
+            } else if (accumulatedText.includes('<reasoning>') && !accumulatedText.includes('</reasoning>')) {
+              // Still inside reasoning tag - show partial content
+              const partialMatch = accumulatedText.match(/<reasoning>([\s\S]*)$/i);
+              if (partialMatch) {
+                const partial = partialMatch[1].trim();
+                if (partial) {
+                  setReasoningPopupText(partial);
+                  setShowReasoningPopup(true);
+                }
               }
             }
           }
@@ -3876,6 +4321,93 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
         setTimeout(() => { holdScrollRef.current = false; }, 1200);
       } catch (e) {
         console.log('Error scrolling after streaming:', e);
+      }
+      
+      // Parse execution flow steps from accumulated text for agentic requests
+      const executionSteps = parseExecutionStep(accumulatedText);
+      if (executionSteps && executionSteps.length > 0) {
+        setExecutionFlows((prev) => ({
+          ...prev,
+          [placeholderId]: {
+            steps: executionSteps,
+            isComplete: true,
+            totalTime: Date.now() - streamingStartTimeRef.current,
+            title: "🤖 Orion selesai berfikir"
+          }
+        }));
+      }
+      
+      // ✨ AI Self-Trigger Agent Detection
+      // Parse [AGENT_EXECUTE: task_description] flag from response
+      const agentExecuteMatch = accumulatedText.match(/\[AGENT_EXECUTE:\s*([^\]]+)\]/);
+      if (agentExecuteMatch) {
+        const agentTaskDescription = agentExecuteMatch[1].trim();
+        console.log(`[ChatBot] 🤖 AI triggered agent execution: "${agentTaskDescription}"`);
+        
+        // Remove the flag from displayed text
+        const cleanedText = accumulatedText.replace(/\s*\[AGENT_EXECUTE:[^\]]*\]/, '').trim();
+        
+        // Update message with cleaned text (without flag)
+        setMessages((prevMessages) => {
+          const updatedMessages = [...prevMessages];
+          const msgIndex = updatedMessages.findIndex(m => m.id === placeholderId);
+          if (msgIndex !== -1) {
+            updatedMessages[msgIndex] = {
+              ...updatedMessages[msgIndex],
+              text: cleanedText
+            };
+          }
+          return updatedMessages;
+        });
+        
+        // Queue agent execution asynchronously to avoid blocking
+        setTimeout(async () => {
+          // Track background agent tasks to avoid showing premature error banners
+          backgroundAgentCountRef.current += 1;
+          try {
+            console.log(`[ChatBot] Executing agent task: ${agentTaskDescription}`);
+            const userId = user?.id || 'guest';
+            
+            // Call agent endpoint
+            const response = await fetch('/api/agent/execute', {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                task: agentTaskDescription,
+                userId: userId
+              })
+            });
+            
+            if (!response.ok) {
+              console.error(`Agent execution failed: ${response.status}`);
+              return;
+            }
+            
+            const result = await response.json();
+            console.log(`[ChatBot] Agent execution completed:`, result);
+            
+            // If file was generated, add download link to message
+            if (result.fileName) {
+              setMessages((prevMessages) => {
+                const updatedMessages = [...prevMessages];
+                const msgIndex = updatedMessages.findIndex(m => m.id === placeholderId);
+                if (msgIndex !== -1) {
+                  updatedMessages[msgIndex] = {
+                    ...updatedMessages[msgIndex],
+                    downloadLink: `/api/download-file/${result.fileName}`,
+                    agentResult: result
+                  };
+                }
+                return updatedMessages;
+              });
+            }
+          } catch (err) {
+            console.error('[ChatBot] Agent execution error:', err);
+          } finally {
+            backgroundAgentCountRef.current = Math.max(0, backgroundAgentCountRef.current - 1);
+          }
+        }, 500);
       }
       
       // Mark message as finished streaming
@@ -3986,7 +4518,7 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
       autoRetryCountRef.current = 0;
     } catch (err) {
       if (err.name === 'AbortError') {
-        setError('Permintaan dihentikan.');
+        showErrorBanner('Permintaan dihentikan.');
         autoRetryCountRef.current = 0;
       } else {
         // Only store placeholderId if it was created (not in image request path)
@@ -4017,7 +4549,7 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
           setError(null);
         } else {
           // After max retries, show error and let user manually click Continue
-          setError(`Gagal setelah ${MAX_AUTO_RETRY} percobaan. Klik Continue untuk melanjutkan.`);
+          showErrorBanner(`Gagal setelah ${MAX_AUTO_RETRY} percobaan. Klik Continue untuk melanjutkan.`);
           autoRetryCountRef.current = 0;
           setConvLoading(false);
         }
@@ -4061,7 +4593,7 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
         let accumulatedRetryText = '';
         let retryChunkQueue = [];
         let isProcessingRetryChunks = false;
-        const CHUNK_DELAY_MS = 120;
+        const CHUNK_DELAY_MS = selectedModel === 'deepernova-1.2-flash' ? 650 : 120;
 
         const processRetryQueuedChunks = async () => {
           if (isProcessingRetryChunks || retryChunkQueue.length === 0) return;
@@ -4108,7 +4640,7 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
         let accumulatedFullRetryText = '';
         let fullRetryChunkQueue = [];
         let isProcessingFullRetryChunks = false;
-        const CHUNK_DELAY_MS = 120;
+        const CHUNK_DELAY_MS = selectedModel === 'deepernova-1.2-flash' ? 650 : 120;
 
         const processFullRetryQueuedChunks = async () => {
           if (isProcessingFullRetryChunks || fullRetryChunkQueue.length === 0) return;
@@ -4154,7 +4686,7 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
       setLastMessage(null);
     } catch (err) {
       if (err.name !== 'AbortError') {
-        setError(`Gagal: ${err.message}. Klik Continue untuk coba lagi.`);
+        showErrorBanner(`Gagal: ${err.message}. Klik Continue untuk coba lagi.`);
       }
       setConvLoading(false);
       abortControllerRef.current = null;
@@ -4190,7 +4722,7 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
       let accumulatedAutoRetryText = '';
       let autoRetryChunkQueue = [];
       let isProcessingAutoRetryChunks = false;
-      const CHUNK_DELAY_MS = 120;
+      const CHUNK_DELAY_MS = selectedModel === 'deepernova-1.2-flash' ? 650 : 120;
 
       const processAutoRetryQueuedChunks = async () => {
         if (isProcessingAutoRetryChunks || autoRetryChunkQueue.length === 0) return;
@@ -4254,10 +4786,14 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
 
   const memoizedMessageList = useMemo(() => {
     if (messages.length === 0) {
+      const displayGreeting = generatingGreeting ? '' : (aiGreeting || getTimeBasedGreeting(userName || user?.name));
+      const displayHint = generatingGreeting ? '' : (aiHint || FALLBACK_GREETINGS.hint);
+      
       return (
         <div className="welcome-message">
-          <h2>{getTimeBasedGreeting(userName || user?.name)}</h2>
-          <p className="welcome-hint">Sebaiknya kita mulai dari mana?</p>
+          {displayGreeting ? <h2>{displayGreeting}</h2> : null}
+          {displayHint ? <p className="welcome-hint">{displayHint}</p> : null}
+          {generatingGreeting && <p style={{ fontSize: '12px', color: '#999', marginTop: '8px' }}>Menyiapkan salam...</p>}
         </div>
       );
     }
@@ -4356,8 +4892,22 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
             )}
             {message.sender === 'bot' && !message.isImage && (() => {
               const { reasoning, mainContent } = extractReasoningContent(message.text);
+              const stepper = agenticSteppers[message.id]; // Get stepper progress for this message
+              const execFlow = executionFlows[message.id]; // Get execution flow for this message
+              
               return (
                 <>
+                  {execFlow && execFlow.steps && execFlow.steps.length > 0 && (
+                    <ExecutionFlow 
+                      steps={execFlow.steps}
+                      isComplete={execFlow.isComplete}
+                      totalTime={execFlow.totalTime}
+                      title={execFlow.title || "🤖 Orion berfikir..."}
+                    />
+                  )}
+                  {stepper && stepper.length > 0 && (
+                    <StepperComponent steps={stepper} />
+                  )}
                   {reasoning && (
                     message.isStreaming ? (
                       <div className="message-reasoning">
@@ -4416,6 +4966,54 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
                 </>
               );
             })()}
+            {message.downloadUrl && message.fileName && (
+              <div style={{
+                marginTop: '12px',
+                padding: '12px',
+                backgroundColor: 'rgba(100, 200, 255, 0.1)',
+                borderRadius: '8px',
+                border: '1px solid rgba(100, 200, 255, 0.3)'
+              }}>
+                <button
+                  onClick={() => {
+                    const link = document.createElement('a');
+                    link.href = message.downloadUrl;
+                    link.download = message.fileName;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                  }}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    padding: '10px 16px',
+                    backgroundColor: '#4CAF50',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                    fontWeight: '500',
+                    transition: 'all 0.2s ease'
+                  }}
+                  onMouseEnter={(e) => e.target.style.backgroundColor = '#45a049'}
+                  onMouseLeave={(e) => e.target.style.backgroundColor = '#4CAF50'}
+                >
+                  📥 Download: {message.fileName}
+                </button>
+                {message.downloadSummary && (
+                  <div style={{
+                    marginTop: '8px',
+                    fontSize: '13px',
+                    color: '#1f2937',
+                    opacity: 0.85
+                  }}>
+                    {message.downloadSummary}
+                  </div>
+                )}
+              </div>
+            )}
             {message.files && message.files.length > 0 && (
               <div className="message-files">
                 {message.files.map((file) => (
@@ -4523,7 +5121,7 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
       );
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, compactView, isScrolledUp, expandedReasoningId, expandedUserMessageId, messageFeedback, userLanguage, playingMessageId, ttsLoading]);
+  }, [messages, compactView, isScrolledUp, expandedReasoningId, expandedUserMessageId, messageFeedback, userLanguage, playingMessageId, ttsLoading, aiGreeting, aiHint, generatingGreeting]);
 
   return (
     <div className="chatbot-app">
@@ -5164,33 +5762,7 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
         +
       </button>
 
-      {/* Floating Code Panel button */}
-      {hasCodeMessage && (
-        <div className="floating-code-panel-wrapper">
-          <button
-            className={`floating-code-panel-btn ${showCodePanelPulse ? 'pulse' : ''}`}
-            onClick={() => {
-              if (loading) {
-                showAlert(userLanguage === 'id' ? 'Maaf, sedang membuat program...' : 'Sorry, still creating program...');
-                return;
-              }
-              const lastBotMessage = [...messages].reverse().find(msg => msg.sender === 'bot' && msg.text && msg.text.includes('```'));
-              if (lastBotMessage) {
-                openHtmlEditor(lastBotMessage.text);
-                setShowCodePanelPulse(false);
-              }
-            }}
-            title={userLanguage === 'id' ? 'Edit & download code' : 'Edit & download code'}
-          >
-            💻 {userLanguage === 'id' ? 'Code Panel' : 'Code Panel'}
-          </button>
-          {showCodePanelPulse && (
-            <div className="code-panel-bubble">
-              {userLanguage === 'id' ? 'Klik di sini untuk lihat hasil' : 'Click here to view results'}
-            </div>
-          )}
-        </div>
-      )}
+
 
       {/* Floating menu for + button */}
       {showFloatingMenu && (
@@ -5258,7 +5830,7 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
           <button
             className="floating-menu-item"
             onClick={() => {
-              onNavigate && onNavigate('documents');
+              setShowFileTypeSelector(true);
               setShowFloatingMenu(false);
             }}
             title={userLanguage === 'id' ? 'Editor dokumen dengan AI' : 'AI Document Editor'}
@@ -5799,8 +6371,9 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
                 scheduleTextareaResize(e.target);
               }}
               onKeyDown={(e) => {
-                // Shift+Enter untuk kirim pesan
-                if (e.shiftKey && e.key === 'Enter') {
+                // Enter biasa: kirim pesan.
+                // Shift+Enter: buat baris baru di textarea.
+                if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
                   handleSendMessage(e);
                 }
@@ -6015,6 +6588,22 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
           userLanguage={userLanguage}
         />
       )}
+
+      {/* File Type Selector Modal */}
+      <FileTypeSelector
+        isOpen={showFileTypeSelector}
+        onClose={() => setShowFileTypeSelector(false)}
+        userName={userName || 'User'}
+        onSelectType={(fileType) => {
+          setShowFileTypeSelector(false);
+          if (fileType === 'ppt') {
+            onNavigate && onNavigate('documents', 'ppt');
+          } else {
+            onNavigate && onNavigate('documents', fileType);
+          }
+        }}
+        userLanguage={userLanguage}
+      />
 
       {/* Image Generator Modal - Removed: now generating inline in chat */}
 

@@ -9,9 +9,10 @@
 import fetch from 'node-fetch';
 import { apiKeyManager } from './apiKeyManager.js';
 
-const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || process.env.VITE_DEEPSEEK_API_KEY;
-// Use mock server in development, or real API if key is valid
-const USE_MOCK = !DEEPSEEK_API_KEY || DEEPSEEK_API_KEY.includes('bf333936') || process.env.USE_MOCK === 'true';
+const HARDCODED_DEEPSEEK_API_KEY = 'sk-bf333936dd084c5f9016521b1b896610';
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || process.env.VITE_DEEPSEEK_API_KEY || HARDCODED_DEEPSEEK_API_KEY;
+// Use mock server only when explicitly requested or no key is available
+const USE_MOCK = !DEEPSEEK_API_KEY || process.env.USE_MOCK === 'true';
 const DEEPSEEK_API_URL = USE_MOCK 
   ? 'http://localhost:3002/v1/chat/completions'
   : 'https://api.deepseek.com/v1/chat/completions';
