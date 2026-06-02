@@ -4394,14 +4394,15 @@ Pastikan selalu gunakan tags <reasoning></reasoning> yang tepat.`;
             console.log(`[ChatBot] Agent execution completed:`, result);
             
             // If file was generated, add download link to message
-            if (result.fileName) {
+            if (result.success && result.fileName && result.downloadUrl) {
               setMessages((prevMessages) => {
                 const updatedMessages = [...prevMessages];
                 const msgIndex = updatedMessages.findIndex(m => m.id === placeholderId);
                 if (msgIndex !== -1) {
                   updatedMessages[msgIndex] = {
                     ...updatedMessages[msgIndex],
-                    downloadLink: `/api/download-file/${result.fileName}`,
+                    downloadUrl: result.downloadUrl,
+                    fileName: result.fileName,
                     agentResult: result
                   };
                 }
