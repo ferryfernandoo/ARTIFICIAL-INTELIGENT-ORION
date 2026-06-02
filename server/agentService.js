@@ -760,7 +760,7 @@ ${cleanCode}
 
         // Before executing, run a Python syntax check to avoid running invalid scripts
         console.log(`[AGENT] ✨ Performing Python syntax check for: ${scriptPath}`);
-        const pyCheck = spawn('python', ['-m', 'py_compile', scriptPath], {
+        const pyCheck = spawn('python3', ['-m', 'py_compile', scriptPath], {
           cwd: sandboxPath,
           stdio: ['ignore', 'pipe', 'pipe'],
           env: {
@@ -792,7 +792,7 @@ ${cleanCode}
           }
 
           // Syntax OK — now spawn the Python process to run the script
-          const python = spawn('python', [scriptPath], {
+          const python = spawn('python3', [scriptPath], {
             cwd: sandboxPath,
             timeout: this.EXEC_TIMEOUT,
             stdio: ['ignore', 'pipe', 'pipe'],
