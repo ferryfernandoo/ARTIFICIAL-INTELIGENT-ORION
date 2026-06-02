@@ -4,12 +4,14 @@
  */
 
 const TOKENMIX_API_URL = 'https://api.tokenmix.ai/v1/audio/speech';
+const HARDCODED_TOKENMIX_API_KEY = 'sk-tm-FX6bbFVk7eG7wK9JF8wqYvSa1PBWPgyDTllws7KE4FAvUuaX';
 
 class TokenMixTtsService {
   constructor() {
     this.cache = new Map();  // Cache audio URLs by text hash
     this.isPlaying = false;
     this.currentAudio = null;
+    this.apiKey = import.meta.env.VITE_TOKENMIX_API_KEY || HARDCODED_TOKENMIX_API_KEY;
   }
 
   /**
@@ -100,7 +102,7 @@ class TokenMixTtsService {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${import.meta.env.VITE_TOKENMIX_API_KEY || ''}`
+          'Authorization': `Bearer ${this.apiKey}`
         },
         body: JSON.stringify({
           model: 'tts-1',
